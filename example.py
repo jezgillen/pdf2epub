@@ -25,6 +25,7 @@ class StatisticsCollection():
         self.default_even_columns = None
         self.column_list_dict = {} # map from page number to 
         self.drawn_boxes = []
+        self.column_start_cache = {}
         #  self.modal_line_difference = None
     def add_column(self, rect_box, rect_id, page, set_as_default=False):
         self.drawn_boxes.append(rect_id)
@@ -63,6 +64,26 @@ class StatisticsCollection():
             
         for rect in column_list:
             yield pdf_coords(*rect)
+
+    def get_column_start(self):
+        # this function has caching because it gets called a lot
+        column = list(self.get_columns(self.curr_page))[self.curr_column]
+        key = (column, page.number)
+        if key in self.column_start_cache:
+            return self.column_start_cache[key]
+        else:
+            mat = fitz.Matrix(1,1) 
+            pix = page.getPixmap(mat, clip=column, colorspace=fitz.csRGB,alpha=False)
+            smaller_column = snap_box_around_object(pix)
+            self.column_start_cache[key] = smaller_column[0]
+            return smaller_column[0]
+
+    def set_curr_page(self, page):
+        self.curr_page = page
+
+    def set_curr_column(self, column):
+        self.curr_column = column
+
 
 
 class Type(Enum):
@@ -530,7 +551,7 @@ def blocks_to_html(blocks, page, span_collection,):
                             # inline equation
                             mat = fitz.Matrix(SCALE_UP,SCALE_UP) 
                             b = s['bbox']
-                            offset = 0.4 # TODO make adjustable. The relationship between this and processInlineEquation needs to be studied
+                            offset = 0.7 # TODO make adjustable. The relationship between this and processInlineEquation needs to be studied
                             bbox = (b[0]-offset, b[1]-offset, b[2]+offset, b[3]+offset)
                             pix = page.getPixmap(mat, clip=bbox, colorspace=fitz.csRGB,alpha=False)
                             image_name = f"inline-pg{pageNumber}-{k}.png"
@@ -542,7 +563,7 @@ def blocks_to_html(blocks, page, span_collection,):
                             k += 1
                             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
                             page_string += "<span>" 
-                            #  draw_box(bbox, graph, line_color='green', line_width=2)
+                            draw_box(newRect, graph, line_color='green', line_width=2)
     return page_string
 
 
@@ -615,17 +636,16 @@ def split_blocks_by_column(blocks, statistics, page):
 
 
 def print_page_to_html(page, blocks, rectangle_collection, statistics):
+    ''' main conversion function '''
 
     html_string = ""
     html_string += create_css_string()
 
     list_of_blocks = split_blocks_by_column(blocks, statistics, page)
 
-    for blocks in list_of_blocks:
-        # TODO pass over to fix line endings and paragaph spacing in text
-        blocks = third_pass(blocks, rectangle_collection, statistics, 
-                spans=rectangle_collection.is_spans)
-
+    for current_column_number, blocks in enumerate(list_of_blocks):
+        statistics.set_curr_page(page)
+        statistics.set_curr_column(current_column_number)
         # convert block_collection to span_collection
         if not rectangle_collection.is_spans:
             span_collection = convert_to_span_collection(blocks, rectangle_collection)
@@ -634,56 +654,52 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
 
         blocks, span_collection = tag_inline_equations(blocks, span_collection)
 
-        # for debugging
-        #  for r in span_collection:
-            #  if r.type == Type.INLINE_EQUATION:
-                #  r.highlight(r.type)
-
         # set continuous set of display equations to be in the same group
         span_collection = join_display_equations(span_collection)
+
+        # pass over to fix line endings and paragaph spacing in text
+        blocks = third_pass(blocks, span_collection, statistics)
+
         html_string += blocks_to_html(blocks, page, span_collection)
 
-    
+
     with open("out.html", "w") as f:
         f.write(html_string)
+
+    import webbrowser
+    webbrowser.open("out.html")
 
 def tag_inline_equations(blocks, span_collection):
     # There's a bug where the image has way too much space below it in the image
 
-    # this currently works by modifying the spans themselves. In future, should change to using rectangles and grouping
+    # this currently works by modifying the spans themselves. 
+    # In future, should change to using rectangles and grouping
     for b in blocks:
         if b['type'] == 0: 
             prev_span = False
             prev_text_span = False
             for l in b["lines"]:
                 for s in l['spans']:
-                    if not s.get('line_space',False):
-                        spanRectangle = span_collection.get_rect_by_bbox(s['bbox'])
-                        if (spanRectangle.type == Type.TEXT) and (len(s['original_text']) <= 4): 
-                            if prev_span and not prev_span['bbox'][0] > s['bbox'][2]:
-                                # join prev_span and s
-                                prev_span['bbox'] = combineBoxes(prev_span['bbox'], s['bbox'])
-                                r = span_collection.create_rect(prev_span['bbox'])
-                                r.type = Type.INLINE_EQUATION
-                                prev_span['text'] += s['text']
-                                s['text'] = ''
-                            else:
-                                # this should be the first span of an equation
-                                # or we have encountered an inline equation broken by a newline
-                                prev_span = s
-                                r = span_collection.create_rect(prev_span['bbox'])
-                                r.type = Type.INLINE_EQUATION
-                                if prev_text_span:
-                                    prev_text_span['text'] += ' '
+                    spanRectangle = span_collection.get_rect_by_bbox(s['bbox'])
+                    if (spanRectangle.type == Type.TEXT) and (len(s['text']) <= 4): 
+                        if prev_span and not prev_span['bbox'][0] > s['bbox'][2]:
+                            # join prev_span and s
+                            prev_span['bbox'] = combineBoxes(prev_span['bbox'], s['bbox'])
+                            r = span_collection.create_rect(prev_span['bbox'])
+                            r.type = Type.INLINE_EQUATION
+                            prev_span['text'] += s['text']
+                            s['text'] = ''
                         else:
-                            prev_span = False
-                            prev_text_span = s
-
+                            # this should be the first span of an equation
+                            # or we have encountered an inline equation broken by a newline
+                            prev_span = s
+                            r = span_collection.create_rect(prev_span['bbox'])
+                            r.type = Type.INLINE_EQUATION
+                            if prev_text_span:
+                                prev_text_span['text'] += ' '
                     else:
-                        # we have an artificial spacing span, created by a previous pass
-                        # This is just to make sure it gets treated as text
-                        r = span_collection.create_rect(s['bbox'])
-                        r.type = Type.TEXT
+                        prev_span = False
+                        prev_text_span = s
 
 
 
@@ -694,58 +710,51 @@ def tag_inline_equations(blocks, span_collection):
         if b['type'] == 0:
             for l in b["lines"]:
                 for s in l['spans']:
-                    if not s.get('line_space',False):
-                        span_rect = span_collection.get_rect_by_bbox(s['bbox'])
-                        t = span_rect.type
-                        if t == Type.INLINE_EQUATION:
-                            draw_box(span_rect.irect, graph, line_color='blue', line_width=2)
-                            print("====")
-                        else:
-                            print(t)
+                    span_rect = span_collection.get_rect_by_bbox(s['bbox'])
+                    t = span_rect.type
+                    if t == Type.INLINE_EQUATION:
+                        draw_box(span_rect.irect, graph, line_color='blue', line_width=2)
     ###############
                         
     return blocks, span_collection
 
 
-def third_pass(blocks, rectangle_collection, statistics, spans=False):
-    ''' Edit the lines to add linebreaks '''
+def third_pass(blocks, span_collection, statistics):
+    ''' 
+    This function adds linebreaks, tabs, and spaces to the blocks.
+    It also does any necessary regex replacements over the text
+    '''
     for b in blocks:
-        if spans:
-            spanRectangle = rectangle_collection.get_rect_by_bbox(
-                    b['lines'][0]['spans'][0]['bbox']
-                    #  b['bbox']
-                    )
-            text = (spanRectangle.type == Type.TEXT)
-        else:
-            blockRectangle = rectangle_collection.get_rect_by_bbox(b['bbox'])
-            text = (blockRectangle.type == Type.TEXT)
+
+        # Start by adding paragraph tags around blocks
+        # could cause problems if the paragraph starts or ends with inline equation? unlikely?
+        b['lines'][0]["spans"][0]['text'] = "<p>" + b['lines'][0]["spans"][0]['text']
+        b['lines'][-1]["spans"][-1]['text'] += "</p>" 
             
         lastSpan = None
-        if text:
+        spanRectangle = span_collection.get_rect_by_bbox(b['lines'][0]['spans'][0]['bbox'])
+        if (spanRectangle.type == Type.TEXT):
             for l in b["lines"]:
-                # Detect newlines
-                # require: column_start, modal_line_diff
-                #  if(lastSpan is not None and lastSpan['text'].endswith('.')):
-                    #  # check for either tabbed first line or extra line space
-                    #  if(l['spans'][0]['bbox'][0] > statistics.line_height+statistics.column_start):
-                        #  # we have a tab
-                        #  l['spans'][0]['text'] = "<br>\t"+l['spans'][0]['text']
-                    #  elif(l['spans'][0]['bbox'][1] > 1.4*statistics.modal_line_diff):
-                        #  l['spans'][0]['text'] = "<br><br>"+l['spans'][0]['text']
+                # Detect paragraph breaks inside of block
+                if(l['spans'][0]['bbox'][0] > 1+statistics.get_column_start()):
+                    # we have a tab, so we add the break and tab to the start of the line
+                    l['spans'][0]['text'] = "<span><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>"+l['spans'][0]['text']
 
-
-                # This way of finding line endings doesn't always work
+                # This section adds spaces between lines
                 lastSpan = l["spans"][-1]
                 if lastSpan['text'].endswith('-'):
+                    # remove hyphenation
                     lastSpan['text'] = lastSpan['text'][:-1]
                 else:
+                    # otherwise simply add a space between lines
+                    # TODO check that it actually is a new line first, sometimes it's dumb
                     space_span = copy.deepcopy(lastSpan)
                     space_span['text'] = ' '
                     space_span['bbox'] = tuple(np.random.rand(4)) #random bbox (may need this later?)
                     l["spans"].append(space_span)
-                    space_span['line_space'] = True
+                    space_span['line_space'] = True # may be able to delete this later
                     
-                    # create span rect
+                # This section is for regex processing
                 for s in l['spans']:
                     # replace accute accent with it's html code (pdf encodes this in a silly way?)
                     # may have to do many more
@@ -755,11 +764,8 @@ def third_pass(blocks, rectangle_collection, statistics, spans=False):
                     #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
                     #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
                     #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
-            else:
-                pass
-                #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
-            l["spans"][-1]['text'] += "</p><p>"
             
+
 
     return blocks
 
@@ -813,11 +819,12 @@ def erase_rectangles(selection, rectangles, graph):
 
 # TODO
 
-# implement line breaks inside of blocks
 # Cut off image bounding boxes if they go over the bbox of the line below.
 # Make a list of pages for storing each page html. Each time you move away from a page it saves it.
+# Make parameters adjustable, offset, scale_up, etc.
 # Button to open current/prev chapter in browser
 # Selection of images that are not contained by a block
+# Footnote selection: will have to look into how to do epub footnotes
 
 #TODO later: with each click, the bbox around the full equation (list of b) expands or contractse equations aren't being rendered as images
 # the expected one about inline equations over line breaks. will need column stats
@@ -849,7 +856,8 @@ input_filename = 'Probability Theory - the logic of science.pdf'
  
 #  current_page = 79
 
-#  input_filename = '/home/jeremy/Dropbox/Projects/pdf2epub/Direct Optimization Approach to HMMs for Single Channel Kinetics.pdf'
+#  input_filename = '/home/jeremy/Dropbox/To read/Deep Belief Nets.pdf'
+#  current_page = 0
 
 
 doc = fitz.open(input_filename)
