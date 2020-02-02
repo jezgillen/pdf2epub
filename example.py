@@ -8,6 +8,8 @@ import re
 import numpy as np
 from enum import Enum
 import copy
+from functools import reduce
+import webbrowser
 
 '''
 Is the mechanism that causes you to become unfamiliar with a word after looking at it for a long time, the same mechanism that causes wheels to turn backwards, and yellow to appear after staring at blue?
@@ -26,8 +28,14 @@ class StatisticsCollection():
         self.column_list_dict = {} # map from page number to 
         self.drawn_boxes = []
         self.column_start_cache = {}
+        self.first_line_tabs = True
         #  self.modal_line_difference = None
     def add_column(self, rect_box, rect_id, page, set_as_default=False):
+
+        # make sure the box is top left to bottom right
+        sx,sy,ex,ey = rect_box
+        rect_box = (min(sx,ex), min(sy,ey), max(sx,ex), max(sy,ey))
+
         self.drawn_boxes.append(rect_id)
         if page.number in self.column_list_dict:
             self.column_list_dict[page.number].append(rect_box)
@@ -157,6 +165,8 @@ class RectangleCollection():
 
     def __iter__(self):
         return self.rectangles.__iter__()
+    def __len__(self):
+        return len(self.rectangles)
 
     def find_rectangle_at(self, point):
         for r in self.rectangles:
@@ -215,6 +225,9 @@ def draw_box(tup, graph, **kwargs):
 def combineBoxes(a, b):
     return (min(a[0],b[0]), min(a[1],b[1]), max(a[2],b[2]), max(a[3],b[3]))
 
+def clip(a, mini, maxi):
+    return max(min(a,maxi), mini)
+
 def remove_equation_label(block):
     newbox = block['lines'][0]['spans'][0]['bbox']
     lastbbox = block['lines'][-1]['spans'][-1]['bbox']
@@ -237,7 +250,6 @@ def process_display_equation(spans):
         else:
             label_span = s
     return label_span, newbox
-
 
 def create_css_string():
     return \
@@ -400,17 +412,20 @@ def processInlineEquation(pixmap, center_of_line):
     else:
         rows_to_add = mid_to_top - mid_to_bot
         newRect[3] += rows_to_add
-        # add rows to bottom
+        #  add rows to bottom
     return tuple(newRect)
 
 
 def get_line_center(line):
     maxlen = 0
+    chosen_text = None
     for s in line["spans"]:
-        if maxlen < (len(s['text'])):
+        if maxlen < (len(s['text'])) and not s.get("line_space",False):
             maxlen = len(s['text'])
+            chosen_text = s['text']
             center_of_line = ((0.4*s['bbox'][1]+0.6*s['bbox'][3]))
             line_height = s['bbox'][3]-s['bbox'][1]
+    print(chosen_text)
 
     return center_of_line, line_height
 
@@ -439,12 +454,6 @@ def new_first_pass(blocks, rectangle_collection):
                 b1 = rectangle_collection.get_rect_by_bbox(prevBlock['bbox'])
                 b2 = rectangle_collection.get_rect_by_bbox(b['bbox'])
                 rectangle_collection.group(b1, b2)
-
-                # TODO remove this??
-                # append to previous block
-                #  prevBlock['bbox'] = maxbbox
-                #  if(prevBlock['type'] == 0): ### This is for testing, may need to fix later
-                    #  prevBlock['lines'] += b['lines']
                 
                 px1, py1, px2, py2 = maxbbox
             else:
@@ -472,12 +481,9 @@ def new_second_pass(blocks, rectangle_collection):
                 r = rectangle_collection.get_rect_by_bbox(b['bbox'])
                 if r.type is None:
                     r.set_type(Type.TEXT)
-                #  elif r.type is None:
-                    #  r.set_type(Type.TEXT)
-                    #  print(f"{r.group} !!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
 
-def blocks_to_html(blocks, page, span_collection,):
+def blocks_to_html(blocks, page, span_collection,column_number):
     pageNumber = page.number
     page_string = ""
     k = 0
@@ -494,7 +500,7 @@ def blocks_to_html(blocks, page, span_collection,):
                     elif (s['bbox'] not in done):
                         span_rect = span_collection.get_rect_by_bbox(s['bbox'])
                         t = span_rect.type
-                        print(s['text'], t, span_rect.irect)
+                        #  print(s['text'])
                         if t == Type.DISPLAY_EQUATION:
                             # get all spans that make up this equation
                             if span_rect.group is not None:
@@ -512,7 +518,7 @@ def blocks_to_html(blocks, page, span_collection,):
                             # take a picture of the equation
                             mat = fitz.Matrix(SCALE_UP, SCALE_UP) 
                             pix = page.getPixmap(mat, clip=bbox)
-                            image_name = f"display-pg{pageNumber}-{k}.png"
+                            image_name = f"display-pg{pageNumber}-{column_number}-{k}.png"
                             k += 1
                             pix.writeImage(image_name) 
                             image_height = pix.irect.y1 - pix.irect.y0
@@ -554,11 +560,11 @@ def blocks_to_html(blocks, page, span_collection,):
                             offset = 0.7 # TODO make adjustable. The relationship between this and processInlineEquation needs to be studied
                             bbox = (b[0]-offset, b[1]-offset, b[2]+offset, b[3]+offset)
                             pix = page.getPixmap(mat, clip=bbox, colorspace=fitz.csRGB,alpha=False)
-                            image_name = f"inline-pg{pageNumber}-{k}.png"
                             newRect = processInlineEquation(pix, center_of_line*SCALE_UP)
                             newRect = np.array(newRect)/SCALE_UP 
                             ratio = ((newRect[3]-newRect[1])/line_height)*2.5 #constant,adjustable?
                             pix = page.getPixmap(mat, clip=newRect)
+                            image_name = f"inline-pg{pageNumber}-{column_number}-{k}.png"
                             pix.writeImage(image_name) 
                             k += 1
                             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
@@ -646,32 +652,29 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
     for current_column_number, blocks in enumerate(list_of_blocks):
         statistics.set_curr_page(page)
         statistics.set_curr_column(current_column_number)
-        # convert block_collection to span_collection
+
+        # convert block_collection to span_collection, TODO does this need to be done in the loop?
         if not rectangle_collection.is_spans:
             span_collection = convert_to_span_collection(blocks, rectangle_collection)
         else:
             span_collection = rectangle_collection
 
         blocks, span_collection = tag_inline_equations(blocks, span_collection)
-
+        if len(span_collection) == 0:
+            continue
         # set continuous set of display equations to be in the same group
         span_collection = join_display_equations(span_collection)
 
         # pass over to fix line endings and paragaph spacing in text
         blocks = third_pass(blocks, span_collection, statistics)
+        # TODO separate function for regex replacements in text
 
-        html_string += blocks_to_html(blocks, page, span_collection)
+        # don't put in an initial linebreaks unless it has a tab
+        html_string += blocks_to_html(blocks, page, span_collection,current_column_number)
 
-
-    with open("out.html", "w") as f:
-        f.write(html_string)
-
-    import webbrowser
-    webbrowser.open("out.html")
+    return html_string
 
 def tag_inline_equations(blocks, span_collection):
-    # There's a bug where the image has way too much space below it in the image
-
     # this currently works by modifying the spans themselves. 
     # In future, should change to using rectangles and grouping
     for b in blocks:
@@ -687,7 +690,6 @@ def tag_inline_equations(blocks, span_collection):
                             prev_span['bbox'] = combineBoxes(prev_span['bbox'], s['bbox'])
                             r = span_collection.create_rect(prev_span['bbox'])
                             r.type = Type.INLINE_EQUATION
-                            prev_span['text'] += s['text']
                             s['text'] = ''
                         else:
                             # this should be the first span of an equation
@@ -718,27 +720,47 @@ def tag_inline_equations(blocks, span_collection):
                         
     return blocks, span_collection
 
+def make_new_span(text, span_collection):
+    span = {'size': 9.963000297546387, 
+            'flags': 4, 
+            'font': 'Times-Roman', 
+            'color': 0, 
+            'text': text, 
+            'bbox': tuple(np.random.rand(4)),
+            'line_space': True, 
+            } 
+            # line_space indicates that it's artificial 
+
+    r = span_collection.create_rect(span['bbox'])
+    r.set_type(Type.TEXT)
+    return span
+    
 
 def third_pass(blocks, span_collection, statistics):
     ''' 
     This function adds linebreaks, tabs, and spaces to the blocks.
     It also does any necessary regex replacements over the text
     '''
-    for b in blocks:
-
-        # Start by adding paragraph tags around blocks
-        # could cause problems if the paragraph starts or ends with inline equation? unlikely?
-        b['lines'][0]["spans"][0]['text'] = "<p>" + b['lines'][0]["spans"][0]['text']
-        b['lines'][-1]["spans"][-1]['text'] += "</p>" 
-            
+    for i, b in enumerate(blocks):
         lastSpan = None
         spanRectangle = span_collection.get_rect_by_bbox(b['lines'][0]['spans'][0]['bbox'])
-        if (spanRectangle.type == Type.TEXT):
+        if (spanRectangle.type == Type.TEXT or spanRectangle.type == Type.INLINE_EQUATION):
+            # Start by adding paragraph tags around blocks
+            # if tabs, only add <br> if there are tab things
+            # if not, add <br> before and after blocks, unless block is both (start or end) and starts with capital or ends with .
+            #  if not statistics.first_line_tabs:
+            if i != 0 or b['lines'][0]['spans'][0]['text'][0].isupper():
+                b['lines'][0]['spans'].insert(0,make_new_span("<p>",span_collection))
+            if i != len(blocks)-1 or b['lines'][0]['spans'][0]['text'][-1] == '.':
+                b['lines'][-1]['spans'].append(make_new_span("</p>",span_collection))
+
             for l in b["lines"]:
                 # Detect paragraph breaks inside of block
                 if(l['spans'][0]['bbox'][0] > 1+statistics.get_column_start()):
                     # we have a tab, so we add the break and tab to the start of the line
-                    l['spans'][0]['text'] = "<span><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>"+l['spans'][0]['text']
+                    # we need to add this tab as an extra span
+                    new = make_new_span("<span><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>",span_collection)
+                    l['spans'].insert(0, new)
 
                 # This section adds spaces between lines
                 lastSpan = l["spans"][-1]
@@ -748,11 +770,8 @@ def third_pass(blocks, span_collection, statistics):
                 else:
                     # otherwise simply add a space between lines
                     # TODO check that it actually is a new line first, sometimes it's dumb
-                    space_span = copy.deepcopy(lastSpan)
-                    space_span['text'] = ' '
-                    space_span['bbox'] = tuple(np.random.rand(4)) #random bbox (may need this later?)
+                    space_span = make_new_span(' ',span_collection)
                     l["spans"].append(space_span)
-                    space_span['line_space'] = True # may be able to delete this later
                     
                 # This section is for regex processing
                 for s in l['spans']:
@@ -764,8 +783,6 @@ def third_pass(blocks, span_collection, statistics):
                     #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
                     #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
                     #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
-            
-
 
     return blocks
 
@@ -777,32 +794,33 @@ def convert_to_span_collection(blocks, rectangle_collection, ungroup=False):
     span_collection = RectangleCollection(graph, is_spans=True)
     for b in blocks:
         blockRectangle = rectangle_collection.get_rect_by_bbox(b['bbox'])
-        if blockRectangle.group is not None and not ungroup:
-            # get all rectangles in group
-            #  group = blockRectangle.group
-            # get all spans in these rectangles
-            span_group = set()
-            for rects in blockRectangle.group:
-                if rects.content['type'] == 0:
-                    for l in rects.content['lines']:
-                        for s in l['spans']:
-                            # create all span rectangles
-                            r = span_collection.create_rect(s['bbox'])
-                            r.type = blockRectangle.type
-                            # set all spans groups 
-                            span_group.add(r)
-                            r.group = span_group
-                            r.content = s
-        else:
-            group = set()
-            for l in b['lines']:
-                for s in l['spans']:
-                    r = span_collection.create_rect(s['bbox'])
-                    r.type = blockRectangle.type
-                    r.content = s
-                    if blockRectangle.type == Type.DISPLAY_EQUATION:
-                        r.group = group
-                        group.add(r)
+        if b['type'] == 0:
+            if blockRectangle.group is not None and not ungroup:
+                # get all rectangles in group
+                #  group = blockRectangle.group
+                # get all spans in these rectangles
+                span_group = set()
+                for rects in blockRectangle.group:
+                    if rects.content['type'] == 0:
+                        for l in rects.content['lines']:
+                            for s in l['spans']:
+                                # create all span rectangles
+                                r = span_collection.create_rect(s['bbox'])
+                                r.type = blockRectangle.type
+                                # set all spans groups 
+                                span_group.add(r)
+                                r.group = span_group
+                                r.content = s
+            else:
+                group = set()
+                for l in b['lines']:
+                    for s in l['spans']:
+                        r = span_collection.create_rect(s['bbox'])
+                        r.type = blockRectangle.type
+                        r.content = s
+                        if blockRectangle.type == Type.DISPLAY_EQUATION:
+                            r.group = group
+                            group.add(r)
 
     return span_collection
 
@@ -819,12 +837,11 @@ def erase_rectangles(selection, rectangles, graph):
 
 # TODO
 
-# Cut off image bounding boxes if they go over the bbox of the line below.
-# Make a list of pages for storing each page html. Each time you move away from a page it saves it.
 # Make parameters adjustable, offset, scale_up, etc.
 # Button to open current/prev chapter in browser
 # Selection of images that are not contained by a block
 # Footnote selection: will have to look into how to do epub footnotes
+# Cut off image bounding boxes if they go over the bbox of the line below.
 
 #TODO later: with each click, the bbox around the full equation (list of b) expands or contractse equations aren't being rendered as images
 # the expected one about inline equations over line breaks. will need column stats
@@ -848,7 +865,7 @@ statistics = StatisticsCollection()
 # example with fill
 
  
-current_page = 83
+current_page = 86
 input_filename = 'Probability Theory - the logic of science.pdf'
 #  current_page = 2
 #  input_filename = '/home/jeremy/Downloads/1905.11786.pdf'
@@ -856,7 +873,7 @@ input_filename = 'Probability Theory - the logic of science.pdf'
  
 #  current_page = 79
 
-#  input_filename = '/home/jeremy/Dropbox/To read/Deep Belief Nets.pdf'
+#  input_filename = '/home/jeremy/Dropbox/To read/'
 #  current_page = 0
 
 
@@ -920,7 +937,8 @@ graph = sg.Graph(
             )
 
 prev_but = sg.Button(button_text="Prev") 
-page_num_label = sg.Text("", key="page_num", relief=sg.RELIEF_SUNKEN, size=(5, 1))
+page_num_label = sg.InputText("", key="page_num",  size=(5, 1), change_submits=True, enable_events=True,justification='center')
+#relief=sg.RELIEF_SUNKEN,
 next_but = sg.Button(button_text="Next")
 process_but = sg.Button(button_text="Process")
 
@@ -938,6 +956,7 @@ page = doc[current_page]
 
 blocks = page.getText("dict")["blocks"]
 blocks, rectangle_collection = initial_draw_and_process_page(page, blocks, statistics)
+list_of_html_pages = [None]*doc.pageCount
 
 for r in rectangle_collection:
     if r.type == Type.DISPLAY_EQUATION:
@@ -1036,7 +1055,14 @@ while True:
         #  selection_mode = event
 
     elif event == "Prev": # Prev button was just pressed
+        # save page
+        html = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        list_of_html_pages[page.number] = html
+
         current_page -= 1
+        current_page = clip(current_page, 0, doc.pageCount-1)
+        window.Element("page_num").Update(value=f"{current_page}")
+
         # handle page turning
         page = doc[current_page]
         blocks = page.getText("dict")["blocks"]
@@ -1050,9 +1076,17 @@ while True:
                 r.highlight(r.type)
         window.Element("page_num").Update(value=f"{current_page}")
 
+
     elif event == "Next": # Next button was just pressed
+        # save page
+        html = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        list_of_html_pages[page.number] = html
+
         #  for use when pressing button
         current_page += 1
+        current_page = clip(current_page, 0, doc.pageCount-1)
+        window.Element("page_num").Update(value=f"{current_page}")
+
         # handle page turning
         page = doc[current_page]
         blocks = page.getText("dict")["blocks"]
@@ -1067,12 +1101,41 @@ while True:
             if r.type == Type.DISPLAY_EQUATION:
                 r.highlight(r.type)
         # TODO remake new page
-        window.Element("page_num").Update(value=f"{current_page}")
+
 
     elif event == "Process":
-        print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        list_of_html_pages[page.number] = html
+
+        # join all the pages that have been processed so far
+        def join_pages(page1, page2):
+            if page1 is not None and page2 is not None:
+                return page1+page2 
+            else:
+                return page1 if page1 is not None else page2
+        joined_pages = reduce(join_pages, list_of_html_pages)
+
+        with open("out.html", "w") as f:
+            f.write(joined_pages)
+
+        webbrowser.open("out.html")
+    elif event == "page_num":
+        current_page = int(window.Element("page_num").Get())
+        current_page = clip(current_page, 0, doc.pageCount-1)
+        window.Element("page_num").Update(value=f"{current_page}")
+
+        # handle page turning
+        page = doc[current_page]
+        blocks = page.getText("dict")["blocks"]
+        rectangle_collection = show_blocks_on_screen(blocks)
+        blocks, rectangle_collection = initial_draw_and_process_page(page, blocks, statistics)
+
+        # select block mode
+        window.Element('Block_Selection').Update(value=True)
+        selection_mode ='Block_Selection' 
+
+        for r in rectangle_collection:
+            if r.type == Type.DISPLAY_EQUATION:
+                r.highlight(r.type)
     else:
         print("unhandled event", event, values)
-
-
-
