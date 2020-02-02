@@ -11,14 +11,11 @@ import copy
 from functools import reduce
 import webbrowser
 
-'''
-Is the mechanism that causes you to become unfamiliar with a word after looking at it for a long time, the same mechanism that causes wheels to turn backwards, and yellow to appear after staring at blue?
-'''
 
 SCALING_FACTOR = 1.4
 SCALE_UP = 10. # how much to increase the resolution of the equations
+TAB_INDENT = 3.
 
-# https://www.youtube.com/watch?v=-cFOsAzigyQ&t=514
 
 class StatisticsCollection():
     def __init__(self):
@@ -552,8 +549,6 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             # line endings should already be dealt with, and paragraphs should have been found
                             center_of_line, line_height = get_line_center(l)
 
-                            page_string += "<span>" 
-
                             # inline equation
                             mat = fitz.Matrix(SCALE_UP,SCALE_UP) 
                             b = s['bbox']
@@ -567,17 +562,28 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             image_name = f"inline-pg{pageNumber}-{column_number}-{k}.png"
                             pix.writeImage(image_name) 
                             k += 1
+                            page_string += "<span>" 
                             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
                             page_string += "<span>" 
                             draw_box(newRect, graph, line_color='green', line_width=2)
+        elif b['type'] == 1:
+            # This is an image block
+            mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR) 
+            pix = page.getPixmap(mat, clip=b['bbox'])
+            image_name = f"image-pg{pageNumber}-{column_number}-{k}.png"
+            pix.writeImage(image_name) 
+            k += 1
+            page_string += "<p>" 
+            page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle;\"/>"
+            page_string += "</p>" 
+
     return page_string
 
 
 def show_blocks_on_screen(blocks):
     rectangle_collection = RectangleCollection(graph)
     for b in blocks:
-        mode = "Display_Mode"
-        r = rectangle_collection.create_rect(b['bbox'], line_color=color_dict[mode],line_width=2)
+        r = rectangle_collection.create_rect(b['bbox'], line_color='cyan',line_width=2)
         r.content = b
 
         # TESTING, showing bboxes
@@ -743,46 +749,47 @@ def third_pass(blocks, span_collection, statistics):
     '''
     for i, b in enumerate(blocks):
         lastSpan = None
-        spanRectangle = span_collection.get_rect_by_bbox(b['lines'][0]['spans'][0]['bbox'])
-        if (spanRectangle.type == Type.TEXT or spanRectangle.type == Type.INLINE_EQUATION):
-            # Start by adding paragraph tags around blocks
-            # if tabs, only add <br> if there are tab things
-            # if not, add <br> before and after blocks, unless block is both (start or end) and starts with capital or ends with .
-            #  if not statistics.first_line_tabs:
-            if i != 0 or b['lines'][0]['spans'][0]['text'][0].isupper():
-                b['lines'][0]['spans'].insert(0,make_new_span("<p>",span_collection))
-            if i != len(blocks)-1 or b['lines'][0]['spans'][0]['text'][-1] == '.':
-                b['lines'][-1]['spans'].append(make_new_span("</p>",span_collection))
+        if b['type'] == 0:
+            spanRectangle = span_collection.get_rect_by_bbox(b['lines'][0]['spans'][0]['bbox'])
+            if (spanRectangle.type == Type.TEXT or spanRectangle.type == Type.INLINE_EQUATION):
+                # Start by adding paragraph tags around blocks
+                # if tabs, only add <br> if there are tab things
+                # if not, add <br> before and after blocks, unless block is both (start or end) and starts with capital or ends with .
+                #  if not statistics.first_line_tabs:
+                if i != 0 or b['lines'][0]['spans'][0]['text'][0].isupper():
+                    b['lines'][0]['spans'].insert(0,make_new_span("<p>",span_collection))
+                if i != len(blocks)-1 or b['lines'][0]['spans'][0]['text'][-1] == '.':
+                    b['lines'][-1]['spans'].append(make_new_span("</p>",span_collection))
 
-            for l in b["lines"]:
-                # Detect paragraph breaks inside of block
-                if(l['spans'][0]['bbox'][0] > 1+statistics.get_column_start()):
-                    # we have a tab, so we add the break and tab to the start of the line
-                    # we need to add this tab as an extra span
-                    new = make_new_span("<span><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>",span_collection)
-                    l['spans'].insert(0, new)
+                for l in b["lines"]:
+                    # Detect paragraph breaks inside of block
+                    if(l['spans'][0]['bbox'][0] > TAB_INDENT+statistics.get_column_start()):
+                        # we have a tab, so we add the break and tab to the start of the line
+                        # we need to add this tab as an extra span
+                        new = make_new_span("<span><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>",span_collection)
+                        l['spans'].insert(0, new)
 
-                # This section adds spaces between lines
-                lastSpan = l["spans"][-1]
-                if lastSpan['text'].endswith('-'):
-                    # remove hyphenation
-                    lastSpan['text'] = lastSpan['text'][:-1]
-                else:
-                    # otherwise simply add a space between lines
-                    # TODO check that it actually is a new line first, sometimes it's dumb
-                    space_span = make_new_span(' ',span_collection)
-                    l["spans"].append(space_span)
-                    
-                # This section is for regex processing
-                for s in l['spans']:
-                    # replace accute accent with it's html code (pdf encodes this in a silly way?)
-                    # may have to do many more
-                    # # TODO test following line as replacement
-                    s['original_text'] = s['text']
-                    s['text'] =  s['text'].encode('ascii', 'xmlcharrefreplace').decode('utf-8')
-                    #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
-                    #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
-                    #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
+                    # This section adds spaces between lines
+                    lastSpan = l["spans"][-1]
+                    if lastSpan['text'].endswith('-'):
+                        # remove hyphenation
+                        lastSpan['text'] = lastSpan['text'][:-1]
+                    else:
+                        # otherwise simply add a space between lines
+                        # TODO check that it actually is a new line first, sometimes it's dumb
+                        space_span = make_new_span(' ',span_collection)
+                        l["spans"].append(space_span)
+                        
+                    # This section is for regex processing
+                    for s in l['spans']:
+                        # replace accute accent with it's html code (pdf encodes this in a silly way?)
+                        # may have to do many more
+                        # # TODO test following line as replacement
+                        s['original_text'] = s['text']
+                        s['text'] =  s['text'].encode('ascii', 'xmlcharrefreplace').decode('utf-8')
+                        #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
+                        #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
+                        #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
 
     return blocks
 
@@ -835,74 +842,28 @@ def erase_rectangles(selection, rectangles, graph):
         rectangles[mode] = list(filter(condition, rectangles[mode]))
 
 
-# TODO
-
-# Make parameters adjustable, offset, scale_up, etc.
-# Button to open current/prev chapter in browser
-# Selection of images that are not contained by a block
-# Footnote selection: will have to look into how to do epub footnotes
-# Cut off image bounding boxes if they go over the bbox of the line below.
-
-#TODO later: with each click, the bbox around the full equation (list of b) expands or contractse equations aren't being rendered as images
-# the expected one about inline equations over line breaks. will need column stats
-# The display equation isn't being joined together, I suspect grouping isn't working in span mode?j
-
-# implement line breaks inside of blocks
-# Cut off image bounding boxes if they go over the bbox of the line below.
-# Make a list of pages for storing each page html. Each time you move away from a page it saves it.
-# Button to open current/prev chapter in browser
-
-# example with fill
-#  rect_object = draw_box(b['bbox'], line_color=color_dict[mode],line_width=2,fill=color_dict[mode], alpha=0.3)
-
-# Old bug that disappeared mysteriously after I fixed some inline equation stuff: The display equation isn't being joined together, I suspect grouping isn't working in span mode?
-
-
-
-
+sg.change_look_and_feel('SystemDefaultForReal')
 statistics = StatisticsCollection()
 
-# example with fill
-
- 
 current_page = 86
 input_filename = 'Probability Theory - the logic of science.pdf'
 #  current_page = 2
 #  input_filename = '/home/jeremy/Downloads/1905.11786.pdf'
-#  current_page = 0
- 
 #  current_page = 79
-
 #  input_filename = '/home/jeremy/Dropbox/To read/'
-#  current_page = 0
 
 
 doc = fitz.open(input_filename)
-page = doc[current_page]  # the second page. We assume every page is the same size
-#  input_filename = '/home/jeremy/Dropbox/Projects/pdf2epub/Direct Optimization Approach to HMMs for Single Channel Kinetics.pdf'
 
 
-
-#  current_page = 2
-#  input_filename = "" 
-#  doc = fitz.open(input_filename)
-#  page = doc[current_page] 
-
-sg.change_look_and_feel('SystemDefaultForReal')
-
-#  current_page = 2
-	# Add a touch of color
-
+# This section adjusts the size of the displayed image so that it fits the screen
 window = sg.Window("pdf2epub")
 screen_height = (window.get_screen_size())[1]
-
-
-mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR)	# Add a touch of color
-
+mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR)
 window = sg.Window("pdf2epub")
+page = doc[doc.pageCount//2]  # the middle page. We assume every page is the same size
 pix = page.getPixmap(mat)
 SCALING_FACTOR *= screen_height*0.88/pix.height # 88% of the screen height
-mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR) 
 pix = page.getPixmap(mat)
 
 sidebar = sg.Column([
@@ -918,15 +879,6 @@ sidebar = sg.Column([
          [sg.Radio("Image", "selectors",key="Image_Mode",enable_events=True)],
          ])
 
-# "black", "red", "green", "blue", "cyan", "yellow", and "magenta"
-color_dict = {  "Erase_Mode"    : "magenta",
-                "Inline_Mode"   : "blue",
-                "Display_Mode"  : "cyan",
-                "Column_Mode"   : "black",
-                "Text_Mode"     : "green",
-                "Image_Mode"    : "red",
-                }
-
 graph = sg.Graph(
             canvas_size=(pix.width, pix.height),
             graph_bottom_left=(0, pix.height),
@@ -938,7 +890,6 @@ graph = sg.Graph(
 
 prev_but = sg.Button(button_text="Prev") 
 page_num_label = sg.InputText("", key="page_num",  size=(5, 1), change_submits=True, enable_events=True,justification='center')
-#relief=sg.RELIEF_SUNKEN,
 next_but = sg.Button(button_text="Next")
 process_but = sg.Button(button_text="Process")
 
@@ -948,7 +899,6 @@ layout = [[prev_but, page_num_label, next_but, process_but],
 window.layout(layout)
 window.finalize()
 graph = window.Element("graph")     # type: sg.Graph
-
 
 # initial page
 window.Element("page_num").Update(value=f"{current_page}")
@@ -961,9 +911,6 @@ list_of_html_pages = [None]*doc.pageCount
 for r in rectangle_collection:
     if r.type == Type.DISPLAY_EQUATION:
         r.highlight(Type.DISPLAY_EQUATION)
-
-
-# do processing down from blocks to spans, process line endings
 
 selection_mode = "Block_Selection"
 selection_type = Type.DISPLAY_EQUATION
@@ -1108,12 +1055,11 @@ while True:
         list_of_html_pages[page.number] = html
 
         # join all the pages that have been processed so far
-        def join_pages(page1, page2):
-            if page1 is not None and page2 is not None:
-                return page1+page2 
-            else:
-                return page1 if page1 is not None else page2
-        joined_pages = reduce(join_pages, list_of_html_pages)
+        accumulator = ''
+        for html_page in list_of_html_pages:
+            if html_page is not None:
+                accumulator += html_page
+        joined_pages = accumulator
 
         with open("out.html", "w") as f:
             f.write(joined_pages)
