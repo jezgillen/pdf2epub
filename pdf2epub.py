@@ -10,11 +10,15 @@ from enum import Enum
 import copy
 from functools import reduce
 import webbrowser
+import os
+from ebooklib import epub
 
 
 SCALING_FACTOR = 1.4
 SCALE_UP = 10. # how much to increase the resolution of the equations
 TAB_INDENT = 3.
+IMAGE_DIR = 'images'
+LANGUAGE = 'en'
 
 
 class StatisticsCollection():
@@ -247,7 +251,47 @@ def process_display_equation(spans):
         else:
             label_span = s
     return label_span, newbox
-
+def create_css():
+    return \
+'''
+.equation_div {
+    display: block;
+    page-break-inside: avoid;
+    }
+.equation_table {
+    border-collapse: separate;
+    border-spacing: 2px;
+    display: table;
+    margin-bottom: 0;
+    margin-top: 0;
+    text-indent: 0;
+    }
+.equation_table_row {
+    display: table-row;
+    vertical-align: middle;
+    }
+.equation_cell {
+    display: table-cell;
+    text-align: inherit;
+    vertical-align: inherit;
+    padding: 1px;
+    }
+.figure-aligncenter-indent {
+    display: block;
+    text-align: center;
+    text-indent: 0;
+    margin: 0 0 1em
+    }
+.right {
+    display: block;
+    font-size: 1em;
+    line-height: 1.2;
+    text-align: right;
+    text-indent: 0;
+    margin: 0 0 1em
+    }
+.table_colgroup
+'''
 def create_css_string():
     return \
 '''
@@ -293,6 +337,7 @@ def create_css_string():
     }
 .table_colgroup
 </style>
+
 '''
 
 def make_display_equation_html(image_name, label, image_height):
@@ -414,16 +459,21 @@ def processInlineEquation(pixmap, center_of_line):
 
 
 def get_line_center(line):
+    ''' This function seeks a part of the line that isn't inline equation '''
     maxlen = 0
     chosen_text = None
+    center_of_line = line_height = None
     for s in line["spans"]:
         if maxlen < (len(s['text'])) and not s.get("line_space",False):
             maxlen = len(s['text'])
             chosen_text = s['text']
             center_of_line = ((0.4*s['bbox'][1]+0.6*s['bbox'][3]))
             line_height = s['bbox'][3]-s['bbox'][1]
-    print(chosen_text)
 
+    # just in case it doesn't find a bit of text to base it's measurements on
+    if center_of_line is None or line_height is None:
+        center_of_line = (0.4*line['bbox'][1]+0.6*line['bbox'][3])
+        line_height = line['bbox'][3]-line['bbox'][1]
     return center_of_line, line_height
 
 def extract_flags(flags):
@@ -483,6 +533,7 @@ def new_second_pass(blocks, rectangle_collection):
 def blocks_to_html(blocks, page, span_collection,column_number):
     pageNumber = page.number
     page_string = ""
+    image_file_list = []
     k = 0
 
     done = set()
@@ -516,8 +567,10 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             mat = fitz.Matrix(SCALE_UP, SCALE_UP) 
                             pix = page.getPixmap(mat, clip=bbox)
                             image_name = f"display-pg{pageNumber}-{column_number}-{k}.png"
+                            image_name = os.path.join(IMAGE_DIR,image_name)
                             k += 1
                             pix.writeImage(image_name) 
+                            image_file_list.append((image_name,pix.getPNGData()))
                             image_height = pix.irect.y1 - pix.irect.y0
                             # if there is no label
                             if label is None:
@@ -560,24 +613,28 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             ratio = ((newRect[3]-newRect[1])/line_height)*2.5 #constant,adjustable?
                             pix = page.getPixmap(mat, clip=newRect)
                             image_name = f"inline-pg{pageNumber}-{column_number}-{k}.png"
+                            image_name = os.path.join(IMAGE_DIR,image_name)
                             pix.writeImage(image_name) 
                             k += 1
                             page_string += "<span>" 
                             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
                             page_string += "<span>" 
+                            image_file_list.append((image_name,pix.getPNGData()))
                             draw_box(newRect, graph, line_color='green', line_width=2)
         elif b['type'] == 1:
             # This is an image block
             mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR) 
             pix = page.getPixmap(mat, clip=b['bbox'])
             image_name = f"image-pg{pageNumber}-{column_number}-{k}.png"
+            image_name = os.path.join(IMAGE_DIR,image_name)
             pix.writeImage(image_name) 
             k += 1
             page_string += "<p>" 
             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle;\"/>"
             page_string += "</p>" 
+            image_file_list.append((image_name,pix.getPNGData()))
 
-    return page_string
+    return page_string, image_file_list
 
 
 def show_blocks_on_screen(blocks):
@@ -651,7 +708,7 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
     ''' main conversion function '''
 
     html_string = ""
-    html_string += create_css_string()
+    image_file_list = []
 
     list_of_blocks = split_blocks_by_column(blocks, statistics, page)
 
@@ -676,9 +733,11 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
         # TODO separate function for regex replacements in text
 
         # don't put in an initial linebreaks unless it has a tab
-        html_string += blocks_to_html(blocks, page, span_collection,current_column_number)
+        html, images = blocks_to_html(blocks, page, span_collection,current_column_number)
+        html_string += html
+        image_file_list += images
 
-    return html_string
+    return html_string, image_file_list
 
 def tag_inline_equations(blocks, span_collection):
     # this currently works by modifying the spans themselves. 
@@ -842,16 +901,25 @@ def erase_rectangles(selection, rectangles, graph):
         rectangles[mode] = list(filter(condition, rectangles[mode]))
 
 
+# Initial setup
 sg.change_look_and_feel('SystemDefaultForReal')
-statistics = StatisticsCollection()
+if not os.path.isdir(IMAGE_DIR):
+    os.mkdir(IMAGE_DIR)
 
-current_page = 86
-input_filename = 'Probability Theory - the logic of science.pdf'
+# process arguments (or open file picker)
+current_page = 0
+#  input_filename = './Probability Theory - the logic of science.pdf'
 #  current_page = 2
 #  input_filename = '/home/jeremy/Downloads/1905.11786.pdf'
 #  current_page = 79
 #  input_filename = '/home/jeremy/Dropbox/To read/'
+window = sg.Window('Select file to convert', [[sg.Text('Filename')], [sg.Input(), sg.FileBrowse(file_types=(("PDF Files", "*.pdf"),))], [sg.OK(), sg.Cancel()] ])
+event, values = window.Read()
+window.close()
+if event == 'Cancel':
+    exit()
 
+input_filename = values['Browse']
 
 doc = fitz.open(input_filename)
 
@@ -870,13 +938,6 @@ sidebar = sg.Column([
          [sg.Radio("Blocks", "selection_mode",key="Block_Selection",default=True,enable_events=True)],
          [sg.Radio("Spans", "selection_mode",key="Span_Selection",enable_events=True)],
          [sg.Radio("Columns", "selection_mode",key="Column_Selection",enable_events=True)],
-         [sg.Text("")],
-         [sg.Radio("Erase","selectors",key="Erase_Mode",default=True,enable_events=True)],
-         [sg.Radio("Inline", "selectors",key="Inline_Mode",enable_events=True)],
-         [sg.Radio("Display", "selectors",key="Display_Mode",enable_events=True)],
-         [sg.Radio("Column", "selectors",key="Column_Mode",enable_events=True)],
-         [sg.Radio("Text", "selectors",key="Text_Mode",enable_events=True)],
-         [sg.Radio("Image", "selectors",key="Image_Mode",enable_events=True)],
          ])
 
 graph = sg.Graph(
@@ -891,9 +952,10 @@ graph = sg.Graph(
 prev_but = sg.Button(button_text="Prev") 
 page_num_label = sg.InputText("", key="page_num",  size=(5, 1), change_submits=True, enable_events=True,justification='center')
 next_but = sg.Button(button_text="Next")
-process_but = sg.Button(button_text="Process")
+process_but = sg.Button(button_text="Make ePub")
+display_but = sg.Button(button_text="Show html in browser")
 
-layout = [[prev_but, page_num_label, next_but, process_but],
+layout = [[prev_but, page_num_label, next_but, process_but, display_but],
           [graph, sidebar]]
 
 window.layout(layout)
@@ -904,9 +966,12 @@ graph = window.Element("graph")     # type: sg.Graph
 window.Element("page_num").Update(value=f"{current_page}")
 page = doc[current_page]
 
+# initialize data structures used for processing the document
+statistics = StatisticsCollection()
 blocks = page.getText("dict")["blocks"]
 blocks, rectangle_collection = initial_draw_and_process_page(page, blocks, statistics)
 list_of_html_pages = [None]*doc.pageCount
+dict_of_image_files = dict()
 
 for r in rectangle_collection:
     if r.type == Type.DISPLAY_EQUATION:
@@ -1002,9 +1067,11 @@ while True:
         #  selection_mode = event
 
     elif event == "Prev": # Prev button was just pressed
+        window["Prev"].Widget.config(cursor='watch') # loading
         # save page
-        html = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
         list_of_html_pages[page.number] = html
+        dict_of_image_files.update(images)
 
         current_page -= 1
         current_page = clip(current_page, 0, doc.pageCount-1)
@@ -1022,12 +1089,15 @@ while True:
             if r.type == Type.DISPLAY_EQUATION:
                 r.highlight(r.type)
         window.Element("page_num").Update(value=f"{current_page}")
+        window["Prev"].Widget.config(cursor='left_ptr') # loading
 
 
     elif event == "Next": # Next button was just pressed
+        window["Next"].Widget.config(cursor='watch') # loading
         # save page
-        html = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
         list_of_html_pages[page.number] = html
+        dict_of_image_files.update(images)
 
         #  for use when pressing button
         current_page += 1
@@ -1047,12 +1117,15 @@ while True:
         for r in rectangle_collection:
             if r.type == Type.DISPLAY_EQUATION:
                 r.highlight(r.type)
-        # TODO remake new page
+
+        window["Next"].Widget.config(cursor='left_ptr') # loading
 
 
-    elif event == "Process":
-        html = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+    elif event == "Show html in browser":
+        window[ "Show html in browser"].Widget.config(cursor='watch') # loading
+        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
         list_of_html_pages[page.number] = html
+        dict_of_image_files.update(images)
 
         # join all the pages that have been processed so far
         accumulator = ''
@@ -1060,11 +1133,85 @@ while True:
             if html_page is not None:
                 accumulator += html_page
         joined_pages = accumulator
+    
 
         with open("out.html", "w") as f:
-            f.write(joined_pages)
+            f.write(create_css_string() + joined_pages)
 
         webbrowser.open("out.html")
+        window[ "Show html in browser"].Widget.config(cursor='left_ptr') # loading
+
+    elif event == "Make ePub":
+        window['Make ePub'].Widget.config(cursor='watch') # loading
+        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        list_of_html_pages[page.number] = html
+        dict_of_image_files.update(images)
+
+        book = epub.EpubBook()
+        # metadata
+        book.set_identifier('random_id_'+str(np.random.randint(10e15, 10e16)))
+        book.set_title(doc.metadata['title'])
+        book.set_language(LANGUAGE)
+        book.add_author(doc.metadata['author'])
+
+        default_css = epub.EpubItem(uid="style_default", file_name="style/default.css", media_type="text/css", content=create_css())
+        book.add_item(default_css)
+
+        # add images
+        for image_file_name, content in dict_of_image_files.items():
+            image = epub.EpubImage()
+            image.file_name = image_file_name
+            image.content = content
+            book.add_item(image)
+        
+        # create chapter for each section of book
+        table_of_contents = doc.getToC(False)
+        for i, toc_item in enumerate(table_of_contents):
+            chapter = epub.EpubHtml(title=toc_item[1],file_name=f"{toc_item[1]}.html",lang=LANGUAGE)
+            chapter.content = '<br>'
+            chapter_start_page = toc_item[2]
+            if i == len(table_of_contents)-1:
+                chapter_end_page = doc.pageCount
+            else: 
+                chapter_end_page = table_of_contents[i+1][2]
+            for p in range(chapter_start_page, chapter_end_page):
+                html_page = list_of_html_pages[p]
+                if html_page is not None:
+                    chapter.content += html_page
+
+            chapter.add_item(default_css)
+            book.add_item(chapter)
+            toc_item[3]['epub_html'] = chapter
+
+
+        def tocTranslator(toc, i=0, level=1):
+            ''' recursively translates pdf table of contents to epub table of contents '''
+            output = []
+            while(i < len(toc)):
+                if toc[i][0] == level:
+                    # add to output
+                    output.append((toc[i][3]['epub_html'],[]))
+                    i += 1
+                elif toc[i][0] == level+1:
+                    outlist, i = tocTranslator(toc, i, level+1)
+                    output[-1][1].extend(outlist)
+                elif toc[i][0] < level:
+                    break
+            return output, i
+        toc, i = tocTranslator(table_of_contents)
+                
+        book.toc = toc
+        
+        # add default NCX and Nav file
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        book.spine = ['nav'] + [toc_item[3]['epub_html'] for toc_item in table_of_contents]
+        epub.write_epub(os.path.splitext(doc.name)[0]+'.epub', book, {})
+
+        
+        window['Make ePub'].Widget.config(cursor='left_ptr') # loading
+
     elif event == "page_num":
         current_page = int(window.Element("page_num").Get())
         current_page = clip(current_page, 0, doc.pageCount-1)
@@ -1083,5 +1230,3 @@ while True:
         for r in rectangle_collection:
             if r.type == Type.DISPLAY_EQUATION:
                 r.highlight(r.type)
-    else:
-        print("unhandled event", event, values)
