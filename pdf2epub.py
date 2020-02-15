@@ -74,25 +74,11 @@ class StatisticsCollection():
         for rect in column_list:
             yield pdf_coords(*rect)
 
-    def get_column_start(self):
-        # this function has caching because it gets called a lot
-        column = list(self.get_columns(self.curr_page))[self.curr_column]
-        key = (column, page.number)
-        if key in self.column_start_cache:
-            return self.column_start_cache[key]
-        else:
-            mat = fitz.Matrix(1,1) 
-            pix = page.getPixmap(mat, clip=column, colorspace=fitz.csRGB,alpha=False)
-            smaller_column = snap_box_around_object(pix)
-            self.column_start_cache[key] = smaller_column[0]
-            return smaller_column[0]
-
     def set_curr_page(self, page):
         self.curr_page = page
 
     def set_curr_column(self, column):
         self.curr_column = column
-
 
 
 class Type(Enum):
@@ -383,13 +369,13 @@ def snap_box_around_object(pixmap, leave_horizontal_space=False):
     numWhiteRowsBottom = 0
     while(not np.alltrue(arr[-(numWhiteRowsBottom+1)] == 255)):
         numWhiteRowsBottom += 1
-        if(numWhiteRowsBottom >= arr.shape[0]):
+        if(numWhiteRowsBottom >= arr.shape[0] - numWhiteRowsTop):
             error = True
             numWhiteRowsBottom = 0
             break
     while(np.alltrue(arr[-(numWhiteRowsBottom+1)] == 255)):
         numWhiteRowsBottom += 1
-        if(numWhiteRowsBottom >= arr.shape[0]):
+        if(numWhiteRowsBottom >= arr.shape[0] - numWhiteRowsTop):
             error = True
             numWhiteRowsBottom = 0
             break
@@ -415,14 +401,14 @@ def snap_box_around_object(pixmap, leave_horizontal_space=False):
     numWhiteRowsRight = 0
     while(not np.alltrue(arr[:,-(numWhiteRowsRight+1)] == 255)):
         numWhiteRowsRight += 1
-        if(numWhiteRowsRight >= arr.shape[1]):
+        if(numWhiteRowsRight >= arr.shape[1] - numWhiteRowsLeft):
             error = True
             numWhiteRowsRight = 0
             break
     if not leave_horizontal_space:
         while(np.alltrue(arr[:,-(numWhiteRowsRight+1)] == 255)):
             numWhiteRowsRight += 1
-            if(numWhiteRowsRight >= arr.shape[1]):
+            if(numWhiteRowsRight >= arr.shape[1] - numWhiteRowsLeft):
                 numWhiteRowsRight = 0
                 error = True
                 break
@@ -430,9 +416,10 @@ def snap_box_around_object(pixmap, leave_horizontal_space=False):
         #  draw_box(win_coords(r.x0,r.y0,r.x1,r.y1), graph, line_color='orange', line_width=2, alpha=0.9, fill='red')
         print(f"Error: in snap box\n{pix.irect}\n")
         #  img.show()
-
-    newRect = [r.x0+numWhiteRowsLeft, r.y0+numWhiteRowsTop, 
-               r.x1-numWhiteRowsRight, r.y1-numWhiteRowsBottom]
+        newRect = [r.x0,r.y0,r.x1,r.y1]
+    else:
+        newRect = [r.x0+numWhiteRowsLeft, r.y0+numWhiteRowsTop, 
+                   r.x1-numWhiteRowsRight, r.y1-numWhiteRowsBottom]
     return tuple(newRect)
 
 def processInlineEquation(pixmap, center_of_line):
@@ -455,6 +442,7 @@ def processInlineEquation(pixmap, center_of_line):
         rows_to_add = mid_to_top - mid_to_bot
         newRect[3] += rows_to_add
         #  add rows to bottom
+
     return tuple(newRect)
 
 
@@ -612,6 +600,7 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             newRect = np.array(newRect)/SCALE_UP 
                             ratio = ((newRect[3]-newRect[1])/line_height)*2.5 #constant,adjustable?
                             pix = page.getPixmap(mat, clip=newRect)
+                            # at this point, sometimes newRect isn't sorted right, messes things up.
                             image_name = f"inline-pg{pageNumber}-{column_number}-{k}.png"
                             image_name = os.path.join(IMAGE_DIR,image_name)
                             pix.writeImage(image_name) 
@@ -648,9 +637,9 @@ def show_blocks_on_screen(blocks):
             for l in b['lines']:
                 for s in l['spans']:
                     draw_box(s['bbox'], graph, line_color='blue', line_width=1)
-                    print(s['text'],end='')
-                print()
-            print()
+                    #  print(s['text'],end='')
+                #  print()
+            #  print()
     return rectangle_collection
 
 
@@ -822,7 +811,7 @@ def third_pass(blocks, span_collection, statistics):
 
                 for l in b["lines"]:
                     # Detect paragraph breaks inside of block
-                    if(l['spans'][0]['bbox'][0] > TAB_INDENT+statistics.get_column_start()):
+                    if(l['spans'][0]['bbox'][0] > TAB_INDENT+b['bbox'][0]): 
                         # we have a tab, so we add the break and tab to the start of the line
                         # we need to add this tab as an extra span
                         new = make_new_span("<span><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>",span_collection)
