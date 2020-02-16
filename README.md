@@ -27,9 +27,7 @@ sudo -H python3.6 -m pip install -U pymupdf
 
 ## TODO
 
-* insert pagebreaks after chapters. 
-* There are paragraph breaks after columns but not after pages
-* Some display equations are not joining together
+* epub chapters not working for smaller document
 * Error handling without crashing
 * Make parameters adjustable, offset, scale_up, tab_threshold etc.
 * Selection of images that are not contained by a block

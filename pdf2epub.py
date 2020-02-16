@@ -182,6 +182,11 @@ class RectangleCollection():
             group.add(r)
             r.group = group
 
+def check_bbox(bbox):
+    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        print("WARNING: bbox isn't formatted correctly")
+        print(bbox)
+    return bbox
 
 def convertToRectangle(s, e):
     maxX = max(s[0], e[0]) / SCALING_FACTOR
@@ -227,7 +232,6 @@ def remove_equation_label(block):
     return label_span, newbox
 
 def process_display_equation(spans):
-    newbox = spans[0]['bbox'] # this makes the assumption that the label is not in the first span
     newbox = None
     label_span = None
     for s in spans:
@@ -237,6 +241,7 @@ def process_display_equation(spans):
         else:
             label_span = s
     return label_span, newbox
+
 def create_css():
     return \
 '''
@@ -522,7 +527,9 @@ def blocks_to_html(blocks, page, span_collection,column_number):
     pageNumber = page.number
     page_string = ""
     image_file_list = []
-    k = 0
+    num_display = 0
+    num_inline = 0
+    num_images = 0
 
     done = set()
     # iterate over spans, creating html as we go
@@ -553,10 +560,16 @@ def blocks_to_html(blocks, page, span_collection,column_number):
 
                             # take a picture of the equation
                             mat = fitz.Matrix(SCALE_UP, SCALE_UP) 
-                            pix = page.getPixmap(mat, clip=bbox)
-                            image_name = f"display-pg{pageNumber}-{column_number}-{k}.png"
+                            pix = page.getPixmap(mat, clip=check_bbox(bbox))
+
+                            # show display bboxes on screen
+                            draw_box(bbox, graph, line_color='orange', line_width=2)
+
+                            if pix.irect.x0 == 0.0 and pix.irect.y0 == 0.0:
+                                print("WARNING: taking a display image of the whole page probably")
+                            image_name = f"display-pg{pageNumber}-col{column_number}-{num_display}.png"
                             image_name = os.path.join(IMAGE_DIR,image_name)
-                            k += 1
+                            num_display += 1
                             pix.writeImage(image_name) 
                             image_file_list.append((image_name,pix.getPNGData()))
                             image_height = pix.irect.y1 - pix.irect.y0
@@ -595,16 +608,19 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             b = s['bbox']
                             offset = 0.7 # TODO make adjustable. The relationship between this and processInlineEquation needs to be studied
                             bbox = (b[0]-offset, b[1]-offset, b[2]+offset, b[3]+offset)
-                            pix = page.getPixmap(mat, clip=bbox, colorspace=fitz.csRGB,alpha=False)
+                            pix = page.getPixmap(mat, clip=check_bbox(bbox), colorspace=fitz.csRGB,alpha=False)
                             newRect = processInlineEquation(pix, center_of_line*SCALE_UP)
                             newRect = np.array(newRect)/SCALE_UP 
                             ratio = ((newRect[3]-newRect[1])/line_height)*2.5 #constant,adjustable?
-                            pix = page.getPixmap(mat, clip=newRect)
+                            pix = page.getPixmap(mat, clip=check_bbox(newRect))
+                            print(pix.irect)
+                            if pix.irect.x0 == 0.0 and pix.irect.y0 == 0.0:
+                                print("WARNING: taking an inline image of the whole page probably")
                             # at this point, sometimes newRect isn't sorted right, messes things up.
-                            image_name = f"inline-pg{pageNumber}-{column_number}-{k}.png"
+                            image_name = f"inline-pg{pageNumber}-col{column_number}-{num_inline}.png"
                             image_name = os.path.join(IMAGE_DIR,image_name)
                             pix.writeImage(image_name) 
-                            k += 1
+                            num_inline += 1
                             page_string += "<span>" 
                             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
                             page_string += "<span>" 
@@ -613,11 +629,14 @@ def blocks_to_html(blocks, page, span_collection,column_number):
         elif b['type'] == 1:
             # This is an image block
             mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR) 
-            pix = page.getPixmap(mat, clip=b['bbox'])
-            image_name = f"image-pg{pageNumber}-{column_number}-{k}.png"
+            pix = page.getPixmap(mat, clip=check_bbox(b['bbox']))
+            print(pix.irect)
+            if pix.irect.x0 == 0.0 and pix.irect.y0 == 0.0:
+                print("WARNING: taking an image image of the whole page probably")
+            image_name = f"image-pg{pageNumber}-col{column_number}-{num_images}.png"
             image_name = os.path.join(IMAGE_DIR,image_name)
             pix.writeImage(image_name) 
-            k += 1
+            num_images += 1
             page_string += "<p>" 
             page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle;\"/>"
             page_string += "</p>" 
@@ -689,7 +708,26 @@ def split_blocks_by_column(blocks, statistics, page):
             if rect_contains_point(column, (x0,y0)):
                 blocks_in_column.append(block)
         list_of_blocks.append(blocks_in_column)
-    return list_of_blocks
+
+    #  detect columns if there are multiple columns in one column selection
+    new_list_of_blocks = []
+    for blocks in list_of_blocks:
+        blocks_in_column = []
+        prev_b = None
+        for b in blocks:
+            x0, y0, x1, y1 = b['bbox']
+            _, _, prev_x1, prev_y1 = prev_b['bbox'] if (prev_b is not None) else (0,0,10e7,10e7)
+            if x0 > prev_x1 and y0 < prev_y1 - page.bound().y1/3:
+                print("Detected one extra column")
+                # we have a new column
+                new_list_of_blocks.append(blocks_in_column)
+                blocks_in_column = []
+                prev_b = None
+            blocks_in_column.append(b)
+            prev_b = b
+        new_list_of_blocks.append(blocks_in_column)
+
+    return new_list_of_blocks
 
 
 
@@ -707,7 +745,7 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
 
         # convert block_collection to span_collection, TODO does this need to be done in the loop?
         if not rectangle_collection.is_spans:
-            span_collection = convert_to_span_collection(blocks, rectangle_collection)
+            span_collection = convert_to_span_collection(blocks, rectangle_collection, True)
         else:
             span_collection = rectangle_collection
 
@@ -850,22 +888,25 @@ def convert_to_span_collection(blocks, rectangle_collection, ungroup=False):
     for b in blocks:
         blockRectangle = rectangle_collection.get_rect_by_bbox(b['bbox'])
         if b['type'] == 0:
-            if blockRectangle.group is not None and not ungroup:
-                # get all rectangles in group
-                #  group = blockRectangle.group
-                # get all spans in these rectangles
-                span_group = set()
-                for rects in blockRectangle.group:
-                    if rects.content['type'] == 0:
-                        for l in rects.content['lines']:
-                            for s in l['spans']:
-                                # create all span rectangles
-                                r = span_collection.create_rect(s['bbox'])
-                                r.type = blockRectangle.type
-                                # set all spans groups 
-                                span_group.add(r)
-                                r.group = span_group
-                                r.content = s
+            if False:
+                pass
+            #  TODO delete? I might just stop doing grouping of blocks?
+            #  if blockRectangle.group is not None and not ungroup:
+                #  # get all rectangles in group
+                #  #  group = blockRectangle.group
+                #  # get all spans in these rectangles
+                #  span_group = set()
+                #  for rects in blockRectangle.group:
+                    #  if rects.content['type'] == 0:
+                        #  for l in rects.content['lines']:
+                            #  for s in l['spans']:
+                                #  # create all span rectangles
+                                #  r = span_collection.create_rect(s['bbox'])
+                                #  r.type = blockRectangle.type
+                                #  # set all spans groups 
+                                #  span_group.add(r)
+                                #  r.group = span_group
+                                #  r.content = s
             else:
                 group = set()
                 for l in b['lines']:
