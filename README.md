@@ -27,8 +27,8 @@ sudo -H python3.6 -m pip install -U pymupdf
 
 ## TODO
 
-* Error handling without crashing
 * Make parameters adjustable, offset, scale_up, tab_threshold etc.
+
 * Selection of images that are not contained by a block
 * links need to be handled.
 * Footnote selection: will have to look into how to do epub footnotes

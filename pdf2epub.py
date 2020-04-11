@@ -64,7 +64,7 @@ class StatisticsCollection():
         ''' Returns a generator of pdf coordinate rectangles, to compare with bboxes '''
         try:
             column_list = self.column_list_dict[page.number]
-        except:
+        except KeyError:
             column_list = self.default_even_columns if page.number%2==0 else self.default_odd_columns
 
         if column_list is None:
@@ -734,35 +734,40 @@ def split_blocks_by_column(blocks, statistics, page):
 def print_page_to_html(page, blocks, rectangle_collection, statistics):
     ''' main conversion function '''
 
-    html_string = ""
-    image_file_list = []
+    try:
+        html_string = ""
+        image_file_list = []
 
-    list_of_blocks = split_blocks_by_column(blocks, statistics, page)
+        list_of_blocks = split_blocks_by_column(blocks, statistics, page)
 
-    for current_column_number, blocks in enumerate(list_of_blocks):
-        statistics.set_curr_page(page)
-        statistics.set_curr_column(current_column_number)
+        for current_column_number, blocks in enumerate(list_of_blocks):
+            statistics.set_curr_page(page)
+            statistics.set_curr_column(current_column_number)
 
-        # convert block_collection to span_collection, TODO does this need to be done in the loop?
-        if not rectangle_collection.is_spans:
-            span_collection = convert_to_span_collection(blocks, rectangle_collection, True)
-        else:
-            span_collection = rectangle_collection
+            # convert block_collection to span_collection, TODO does this need to be done in the loop?
+            if not rectangle_collection.is_spans:
+                span_collection = convert_to_span_collection(blocks, rectangle_collection, True)
+            else:
+                span_collection = rectangle_collection
 
-        blocks, span_collection = tag_inline_equations(blocks, span_collection)
-        if len(span_collection) == 0:
-            continue
-        # set continuous set of display equations to be in the same group
-        span_collection = join_display_equations(span_collection)
+            blocks, span_collection = tag_inline_equations(blocks, span_collection)
+            if len(span_collection) == 0:
+                continue
+            # set continuous set of display equations to be in the same group
+            span_collection = join_display_equations(span_collection)
 
-        # pass over to fix line endings and paragaph spacing in text
-        blocks = third_pass(blocks, span_collection, statistics)
-        # TODO separate function for regex replacements in text
+            # pass over to fix line endings and paragaph spacing in text
+            blocks = third_pass(blocks, span_collection, statistics)
+            # TODO separate function for regex replacements in text
 
-        # don't put in an initial linebreaks unless it has a tab
-        html, images = blocks_to_html(blocks, page, span_collection,current_column_number)
-        html_string += html
-        image_file_list += images
+            # don't put in an initial linebreaks unless it has a tab
+            html, images = blocks_to_html(blocks, page, span_collection,current_column_number)
+            html_string += html
+            image_file_list += images
+    except: # catch ALL exceptions
+        e = sys.exc_info()[0]
+        print(f"Error converting page to html: {e}")
+        html_string, image_file_list = "", []
 
     return html_string, image_file_list
 
@@ -929,6 +934,69 @@ def erase_rectangles(selection, rectangles, graph):
             return True
     for mode in rectangles:
         rectangles[mode] = list(filter(condition, rectangles[mode]))
+
+def create_epub_file(list_of_html_pages, dict_of_image_files, doc):
+    book = epub.EpubBook()
+    # metadata
+    book.set_identifier('random_id_'+str(np.random.randint(10e15, 10e16)))
+    book.set_title(doc.metadata['title'])
+    book.set_language(LANGUAGE)
+    book.add_author(doc.metadata['author'])
+
+    default_css = epub.EpubItem(uid="style_default", file_name="style/default.css", media_type="text/css", content=create_css())
+    book.add_item(default_css)
+
+    # add images
+    for image_file_name, content in dict_of_image_files.items():
+        image = epub.EpubImage()
+        image.file_name = image_file_name
+        image.content = content
+        book.add_item(image)
+    
+    # create chapter for each section of book
+    table_of_contents = doc.getToC(False)
+    for i, toc_item in enumerate(table_of_contents):
+        chapter = epub.EpubHtml(title=toc_item[1],file_name=f"{toc_item[1]}.html",lang=LANGUAGE)
+        chapter.content = '<br>'
+        chapter_start_page = toc_item[2]
+        if i == len(table_of_contents)-1:
+            chapter_end_page = doc.pageCount
+        else: 
+            chapter_end_page = table_of_contents[i+1][2]
+        for p in range(chapter_start_page, chapter_end_page):
+            html_page = list_of_html_pages[p-1]
+            if html_page is not None:
+                chapter.content += html_page
+
+        chapter.add_item(default_css)
+        book.add_item(chapter)
+        toc_item[3]['epub_html'] = chapter
+
+
+    def tocTranslator(toc, i=0, level=1):
+        ''' recursively translates pdf table of contents to epub table of contents '''
+        output = []
+        while(i < len(toc)):
+            if toc[i][0] == level:
+                # add to output
+                output.append((toc[i][3]['epub_html'],[]))
+                i += 1
+            elif toc[i][0] == level+1:
+                outlist, i = tocTranslator(toc, i, level+1)
+                output[-1][1].extend(outlist)
+            elif toc[i][0] < level:
+                break
+        return output, i
+    toc, _ = tocTranslator(table_of_contents)
+            
+    book.toc = toc
+    
+    # add default NCX and Nav file
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    book.spine = ['nav'] + [toc_item[3]['epub_html'] for toc_item in table_of_contents]
+    epub.write_epub(os.path.splitext(doc.name)[0]+'.epub', book, {})
 
 
 # Initial setup
@@ -1177,67 +1245,12 @@ while True:
         list_of_html_pages[page.number] = html
         dict_of_image_files.update(images)
 
-        book = epub.EpubBook()
-        # metadata
-        book.set_identifier('random_id_'+str(np.random.randint(10e15, 10e16)))
-        book.set_title(doc.metadata['title'])
-        book.set_language(LANGUAGE)
-        book.add_author(doc.metadata['author'])
+        try:
+            create_epub_file(list_of_html_pages, dict_of_image_files, doc)
+        except: # catch ALL exceptions
+            e = sys.exc_info()[0]
+            print(f"Error: {e}")
 
-        default_css = epub.EpubItem(uid="style_default", file_name="style/default.css", media_type="text/css", content=create_css())
-        book.add_item(default_css)
-
-        # add images
-        for image_file_name, content in dict_of_image_files.items():
-            image = epub.EpubImage()
-            image.file_name = image_file_name
-            image.content = content
-            book.add_item(image)
-        
-        # create chapter for each section of book
-        table_of_contents = doc.getToC(False)
-        for i, toc_item in enumerate(table_of_contents):
-            chapter = epub.EpubHtml(title=toc_item[1],file_name=f"{toc_item[1]}.html",lang=LANGUAGE)
-            chapter.content = '<br>'
-            chapter_start_page = toc_item[2]
-            if i == len(table_of_contents)-1:
-                chapter_end_page = doc.pageCount
-            else: 
-                chapter_end_page = table_of_contents[i+1][2]
-            for p in range(chapter_start_page, chapter_end_page):
-                html_page = list_of_html_pages[p-1]
-                if html_page is not None:
-                    chapter.content += html_page
-
-            chapter.add_item(default_css)
-            book.add_item(chapter)
-            toc_item[3]['epub_html'] = chapter
-
-
-        def tocTranslator(toc, i=0, level=1):
-            ''' recursively translates pdf table of contents to epub table of contents '''
-            output = []
-            while(i < len(toc)):
-                if toc[i][0] == level:
-                    # add to output
-                    output.append((toc[i][3]['epub_html'],[]))
-                    i += 1
-                elif toc[i][0] == level+1:
-                    outlist, i = tocTranslator(toc, i, level+1)
-                    output[-1][1].extend(outlist)
-                elif toc[i][0] < level:
-                    break
-            return output, i
-        toc, _ = tocTranslator(table_of_contents)
-                
-        book.toc = toc
-        
-        # add default NCX and Nav file
-        book.add_item(epub.EpubNcx())
-        book.add_item(epub.EpubNav())
-
-        book.spine = ['nav'] + [toc_item[3]['epub_html'] for toc_item in table_of_contents]
-        epub.write_epub(os.path.splitext(doc.name)[0]+'.epub', book, {})
 
         
         window['Make ePub'].Widget.config(cursor='left_ptr') # loading
