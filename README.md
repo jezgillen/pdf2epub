@@ -30,11 +30,12 @@ sudo -H python3.6 -m pip install -U pymupdf
 * Make parameters adjustable, offset, scale_up, tab_threshold etc.
 
 * Selection of images that are not contained by a block
-* links need to be handled.
 * Footnote selection: will have to look into how to do epub footnotes
+* Option to turn off equation handling
+* Make a button to process the current page without moving to the next (showing inline equation handling)
+* Make a button to show prev-current-next page in browser
+* links need to be handled.
 * Cut off image bounding boxes if they go over the bbox of the line below. avoids the i problem
-* Option to turn of equation handling
-* Fix the no spaces in a line problem
 
 
 

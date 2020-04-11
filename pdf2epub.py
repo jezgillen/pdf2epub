@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 import PySimpleGUI as sg
-import random
 import string
 import fitz
 from PIL import Image, ImageColor
@@ -8,10 +7,11 @@ import re
 import numpy as np
 from enum import Enum
 import copy
-from functools import reduce
 import webbrowser
 import os
 from ebooklib import epub
+import sys
+import traceback
 
 
 SCALING_FACTOR = 1.4
@@ -758,15 +758,16 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
 
             # pass over to fix line endings and paragaph spacing in text
             blocks = third_pass(blocks, span_collection, statistics)
+
             # TODO separate function for regex replacements in text
+            blocks = fourth_pass(blocks, span_collection, statistics, page)
 
             # don't put in an initial linebreaks unless it has a tab
             html, images = blocks_to_html(blocks, page, span_collection,current_column_number)
             html_string += html
             image_file_list += images
     except: # catch ALL exceptions
-        e = sys.exc_info()[0]
-        print(f"Error converting page to html: {e}")
+        traceback.print_exc()
         html_string, image_file_list = "", []
 
     return html_string, image_file_list
@@ -836,7 +837,6 @@ def make_new_span(text, span_collection):
 def third_pass(blocks, span_collection, statistics):
     ''' 
     This function adds linebreaks, tabs, and spaces to the blocks.
-    It also does any necessary regex replacements over the text
     '''
     for i, b in enumerate(blocks):
         lastSpan = None
@@ -871,18 +871,42 @@ def third_pass(blocks, span_collection, statistics):
                         space_span = make_new_span(' ',span_collection)
                         l["spans"].append(space_span)
                         
-                    # This section is for regex processing
-                    for s in l['spans']:
-                        # replace accute accent with it's html code (pdf encodes this in a silly way?)
-                        # may have to do many more
-                        # # TODO test following line as replacement
-                        s['original_text'] = s['text']
-                        s['text'] =  s['text'].encode('ascii', 'xmlcharrefreplace').decode('utf-8')
-                        #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
-                        #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
-                        #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
-
     return blocks
+
+def fourth_pass(blocks, span_collection, statistics, page):
+    ''' 
+    This one is for any necessary regex replacements over the text, 
+    or for fixing some of the terrible ways pdf stores text
+    '''
+    for i, b in enumerate(blocks):
+        if b['type'] == 0:
+            for j, l in enumerate(b["lines"]):
+                for k, s in enumerate(l['spans']):
+
+                    s['original_text'] = s['text']
+                    s['text'] =  s['text'].encode('ascii', 'xmlcharrefreplace').decode('utf-8')
+                    # replace accute accent with it's html code (pdf encodes this in a silly way?)
+                    # may have to do many more
+                    # # TODO test following line as replacement
+                    #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
+                    #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
+                    #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
+
+                    # The following section fixes lines that 
+                    if(not s.get('line_space',False) and 
+                            (len(s['text']) > 10) and 
+                            (' ' not in s['text'])):
+                        raw = page.getText("rawdict")
+                        characters = raw['blocks'][i]['lines'][j]['spans'][k]['chars']
+                        chars = []
+                        for i in range(len(characters)-1):
+                            if characters[i]['bbox'][0] - characters[i-1]['bbox'][2] > 1e-2:
+                                chars.append(' ')
+                            chars.append(characters[i]['c'])
+                        chars.append(characters[-1]['c'])
+                        s['text'] = ''.join(chars)
+    return blocks
+
 
 def convert_to_span_collection(blocks, rectangle_collection, ungroup=False):
     # attach every rect to it's span, maintain grouping
@@ -1050,10 +1074,11 @@ graph = sg.Graph(
 prev_but = sg.Button(button_text="Prev") 
 page_num_label = sg.InputText("", key="page_num",  size=(5, 1), change_submits=True, enable_events=True,justification='center')
 next_but = sg.Button(button_text="Next")
-process_but = sg.Button(button_text="Make ePub")
+epub_but = sg.Button(button_text="Make ePub")
 display_but = sg.Button(button_text="Show html in browser")
+process_page_but = sg.Button(button_text="Process page")
 
-layout = [[prev_but, page_num_label, next_but, process_but, display_but],
+layout = [[prev_but, page_num_label, next_but, epub_but, display_but, process_page_but],
           [graph, sidebar]]
 
 window.layout(layout)
@@ -1248,28 +1273,36 @@ while True:
         try:
             create_epub_file(list_of_html_pages, dict_of_image_files, doc)
         except: # catch ALL exceptions
-            e = sys.exc_info()[0]
-            print(f"Error: {e}")
+            traceback.print_exc()
 
 
         
         window['Make ePub'].Widget.config(cursor='left_ptr') # loading
 
     elif event == "page_num":
-        current_page = int(window.Element("page_num").Get())
-        current_page = clip(current_page, 0, doc.pageCount-1)
-        window.Element("page_num").Update(value=f"{current_page}")
+        try:
+            current_page = int(window.Element("page_num").Get())
+            current_page = clip(current_page, 0, doc.pageCount-1)
+            window.Element("page_num").Update(value=f"{current_page}")
 
-        # handle page turning
-        page = doc[current_page]
-        blocks = page.getText("dict")["blocks"]
-        rectangle_collection = show_blocks_on_screen(blocks)
-        blocks, rectangle_collection = initial_draw_and_process_page(page, blocks, statistics)
+            # handle page turning
+            page = doc[current_page]
+            blocks = page.getText("dict")["blocks"]
+            rectangle_collection = show_blocks_on_screen(blocks)
+            blocks, rectangle_collection = initial_draw_and_process_page(page, blocks, statistics)
 
-        # select block mode
-        window.Element('Block_Selection').Update(value=True)
-        selection_mode ='Block_Selection' 
+            # select block mode
+            window.Element('Block_Selection').Update(value=True)
+            selection_mode ='Block_Selection' 
 
-        for r in rectangle_collection:
-            if r.type == Type.DISPLAY_EQUATION:
-                r.highlight(r.type)
+            for r in rectangle_collection:
+                if r.type == Type.DISPLAY_EQUATION:
+                    r.highlight(r.type)
+        except ValueError:
+            pass
+
+    elif event == "Process page":
+        # can use bbox x coords to detect spaces
+        raw = page.getText("rawdict")
+        import pprint
+        pprint.pprint(raw)
