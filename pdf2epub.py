@@ -1205,7 +1205,7 @@ while True:
             else: 
                 chapter_end_page = table_of_contents[i+1][2]
             for p in range(chapter_start_page, chapter_end_page):
-                html_page = list_of_html_pages[p]
+                html_page = list_of_html_pages[p-1]
                 if html_page is not None:
                     chapter.content += html_page
 
@@ -1228,7 +1228,7 @@ while True:
                 elif toc[i][0] < level:
                     break
             return output, i
-        toc, i = tocTranslator(table_of_contents)
+        toc, _ = tocTranslator(table_of_contents)
                 
         book.toc = toc
         
