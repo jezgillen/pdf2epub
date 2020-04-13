@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 import PySimpleGUI as sg
-import string
+#  import string
 import fitz
 from PIL import Image, ImageColor
 import re
@@ -12,6 +12,7 @@ import os
 from ebooklib import epub
 import sys
 import traceback
+from pprint import pprint
 
 
 SCALING_FACTOR = 1.4
@@ -87,6 +88,7 @@ class Type(Enum):
     IMAGE = 2
     TEXT = 3
     COLUMN = 4
+    FOOTNOTE_LINK = 5
 
 class Rectangle():
     def __init__(self, irect, graph, **kwargs):
@@ -96,6 +98,7 @@ class Rectangle():
         self.background_object = None
         self.selected = False
         self.type = None
+        self.footnote = False
         self.group = None # A set of rectangles
         self.content = None # the span or block
 
@@ -521,11 +524,13 @@ def new_second_pass(blocks, rectangle_collection):
                 r = rectangle_collection.get_rect_by_bbox(b['bbox'])
                 if r.type is None:
                     r.set_type(Type.TEXT)
+    return rectangle_collection
 
 
-def blocks_to_html(blocks, page, span_collection,column_number):
+def blocks_to_html(blocks, page, span_collection, column_number):
     pageNumber = page.number
     page_string = ""
+    footnote_string = ""
     image_file_list = []
     num_display = 0
     num_inline = 0
@@ -537,11 +542,13 @@ def blocks_to_html(blocks, page, span_collection,column_number):
         if b['type'] == 0:
             for l in b["lines"]:
                 for s in l['spans']:
+                    span_string = ""
+                    span_rect = span_collection.get_rect_by_bbox(s['bbox'])
                     if (s['bbox'] not in done) and s.get('line_space',False):
                         # In this case, it's a space or newline that I've added in third_pass
-                        page_string += f"{s['text']}"
+                        #  print(f"Printing out a spacing element: {s['text']}")
+                        span_string += f"{s['text']}"
                     elif (s['bbox'] not in done):
-                        span_rect = span_collection.get_rect_by_bbox(s['bbox'])
                         t = span_rect.type
                         #  print(s['text'])
                         if t == Type.DISPLAY_EQUATION:
@@ -582,22 +589,22 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                                 label_text = label['text']
 
                             ratio = (image_height/line_height)*(3./SCALE_UP) #TODO 3 is adjustable?
-                            page_string += make_display_equation_html(image_name, label_text, ratio)
+                            span_string += make_display_equation_html(image_name, label_text, ratio)
 
                         elif t == Type.TEXT:
                             # get line stats if necessary
                             italic, bold, superscripted, monospaced, serifed = extract_flags(s['flags'])
-                            page_string += "<span>"
+                            span_string += "<span>"
                             if(bold):
-                                page_string += "<b>"
+                                span_string += "<b>"
                             if(italic):
-                                page_string += "<i>"
-                            page_string += f"{s['text']}"
+                                span_string += "<i>"
+                            span_string += f"{s['text']}"
                             if(bold):
-                                page_string += "</b>"
+                                span_string += "</b>"
                             if(italic):
-                                page_string += "</i>"
-                            page_string += "</span>"
+                                span_string += "</i>"
+                            span_string += "</span>"
 
                         elif t == Type.INLINE_EQUATION:
                             # line endings should already be dealt with, and paragraphs should have been found
@@ -621,11 +628,30 @@ def blocks_to_html(blocks, page, span_collection,column_number):
                             image_name = os.path.join(IMAGE_DIR,image_name)
                             pix.writeImage(image_name) 
                             num_inline += 1
-                            page_string += "<span>" 
-                            page_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
-                            page_string += "<span>" 
+                            span_string += "<span>" 
+                            span_string += f"<img src=\"{image_name}\" style=\"vertical-align:middle; height:{ratio:.2f}ex;\"/>"
+                            span_string += "<span>" 
                             image_file_list.append((image_name,pix.getPNGData()))
                             draw_box(newRect, graph, line_color='green', line_width=2)
+
+                        elif t == Type.FOOTNOTE_LINK:
+                            # make the href (which should be made out of the number and the page)
+                            href = f"footnote-p{page.number}"
+                            # add the next line to the html 
+                            link_html = '<sup><a href="footnotes.xhtml#{}" epub:type="noteref" >[{}]</a></sup>'
+                            span_string += link_html.format(href, s['text'])
+                            print(f"Created footnote link for footnote {s['text']}")
+
+                    # create actual footnotes here, output to footnote_string
+                    if span_rect.footnote == True:
+                        # append to the footnote string instead
+                        # check if this is a sup number (marking the start of a footnote)
+                        # if so, add a backward link (which should be made out of the number and the page)
+                        footnote_string += span_string
+                    else:
+                        page_string += span_string
+
+
         elif b['type'] == 1:
             # This is an image block
             mat = fitz.Matrix(SCALING_FACTOR, SCALING_FACTOR) 
@@ -642,7 +668,11 @@ def blocks_to_html(blocks, page, span_collection,column_number):
             page_string += "</p>" 
             image_file_list.append((image_name,pix.getPNGData()))
 
-    return page_string, image_file_list
+    if(len(footnote_string) > 0): 
+        start_footnote_tag = '<aside id="footnote-p{}" epub:type="footnote">'.format(page.number) 
+        footnote_string = start_footnote_tag + footnote_string + '</aside>'
+
+    return page_string, image_file_list, footnote_string
 
 
 def show_blocks_on_screen(blocks):
@@ -670,12 +700,31 @@ def initial_draw_and_process_page(page, blocks, statistics):
 
     rectangle_collection = show_blocks_on_screen(blocks)
     # group overlapping blocks
-    # TODO change return value
-    modified_blocks = new_first_pass(blocks, rectangle_collection)
+    rectangle_collection = new_first_pass(blocks, rectangle_collection)
     # detect equation blocks and all non text blocks
-    modified_blocks = new_second_pass(blocks, rectangle_collection)
+    rectangle_collection = new_second_pass(blocks, rectangle_collection)
+
+    rectangle_collection = tag_footnote(blocks, rectangle_collection)
 
     return blocks, rectangle_collection
+
+def tag_footnote(blocks, rectangle_collection):
+    '''
+    Currently detects footnotes by looking for a end block that starts with a number
+    TODO: Update to handle bottom page numbers, and so that the user can help detect footnotes
+    '''
+    try:
+        last_block = blocks[-1]
+        first_span = last_block['lines'][0]['spans'][0]
+        if(first_span['text'].isdigit() and len(last_block['lines'][0]) > 1):
+            #  pprint(first_span)
+            # get the relevant rectangle
+            r = rectangle_collection.get_rect_by_bbox(last_block['bbox'])
+            # set it to be a footnote
+            r.footnote = True
+    except (KeyError, IndexError):
+        pass
+    return rectangle_collection
 
 def join_display_equations(span_collection):
     prev_span = list(span_collection)[0]
@@ -737,6 +786,17 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
     try:
         html_string = ""
         image_file_list = []
+        footnotes_string = ""
+
+        # convert block_collection to span_collection
+        if not rectangle_collection.is_spans:
+            span_collection = convert_to_span_collection(blocks, rectangle_collection, True)
+        else:
+            span_collection = rectangle_collection
+
+        # function for regex replacements in text
+        # gonna rename it, but I also find it funny
+        blocks = fourth_pass(blocks, span_collection, statistics, page)
 
         list_of_blocks = split_blocks_by_column(blocks, statistics, page)
 
@@ -744,33 +804,50 @@ def print_page_to_html(page, blocks, rectangle_collection, statistics):
             statistics.set_curr_page(page)
             statistics.set_curr_column(current_column_number)
 
-            # convert block_collection to span_collection, TODO does this need to be done in the loop?
-            if not rectangle_collection.is_spans:
-                span_collection = convert_to_span_collection(blocks, rectangle_collection, True)
-            else:
-                span_collection = rectangle_collection
+
+            span_collection = tag_footnote_links(blocks, span_collection)
+
 
             blocks, span_collection = tag_inline_equations(blocks, span_collection)
+
+            # TODO what is this for?
             if len(span_collection) == 0:
                 continue
             # set continuous set of display equations to be in the same group
             span_collection = join_display_equations(span_collection)
 
+
             # pass over to fix line endings and paragaph spacing in text
             blocks = third_pass(blocks, span_collection, statistics)
 
-            # TODO separate function for regex replacements in text
-            blocks = fourth_pass(blocks, span_collection, statistics, page)
-
             # don't put in an initial linebreaks unless it has a tab
-            html, images = blocks_to_html(blocks, page, span_collection,current_column_number)
+            html, images, footnotes = blocks_to_html(blocks, page, span_collection,current_column_number)
             html_string += html
             image_file_list += images
+            footnotes_string += footnotes
     except: # catch ALL exceptions
         traceback.print_exc()
-        html_string, image_file_list = "", []
+        html_string, image_file_list, footnotes_string = "", [], ""
 
-    return html_string, image_file_list
+    return html_string, image_file_list, footnotes_string
+
+def tag_footnote_links(blocks, span_collection):
+    # some code to identify FOOTNOTE_LINKS, that only works if there are footnotes at the bottom of the page, and doesn't include links in the footnote
+    for b in blocks:
+        if b['type'] == 0: 
+            for l in b["lines"]:
+                prevSpan = None
+                for s in l['spans']:
+                    spanRectangle = span_collection.get_rect_by_bbox(s['bbox'])
+                    if (spanRectangle.type == Type.TEXT) and (len(s['text']) <= 3): 
+                        # if superscript and number and not in a footnote
+                        if(s['text'].isdigit() and s['flags'] & 1 and not spanRectangle.footnote):
+                            # The following check is required to make sure it doesn't catch powers
+                            if prevSpan is not None and prevSpan['text'].endswith('.'):
+                                spanRectangle.type = Type.FOOTNOTE_LINK
+                    prevSpan = s
+    return span_collection
+
 
 def tag_inline_equations(blocks, span_collection):
     # this currently works by modifying the spans themselves. 
@@ -788,6 +865,7 @@ def tag_inline_equations(blocks, span_collection):
                             prev_span['bbox'] = combineBoxes(prev_span['bbox'], s['bbox'])
                             r = span_collection.create_rect(prev_span['bbox'])
                             r.type = Type.INLINE_EQUATION
+                            r.footnote = spanRectangle.footnote
                             s['text'] = ''
                         else:
                             # this should be the first span of an equation
@@ -795,6 +873,8 @@ def tag_inline_equations(blocks, span_collection):
                             prev_span = s
                             r = span_collection.create_rect(prev_span['bbox'])
                             r.type = Type.INLINE_EQUATION
+                            r.footnote = spanRectangle.footnote
+                            #  print("this span is inline equation: ",s['text'])
                             if prev_text_span:
                                 prev_text_span['text'] += ' '
                     else:
@@ -842,7 +922,17 @@ def third_pass(blocks, span_collection, statistics):
         lastSpan = None
         if b['type'] == 0:
             spanRectangle = span_collection.get_rect_by_bbox(b['lines'][0]['spans'][0]['bbox'])
-            if (spanRectangle.type == Type.TEXT or spanRectangle.type == Type.INLINE_EQUATION):
+            if spanRectangle.footnote:
+                prevSpan = None
+                for l in b["lines"]:
+                    # Detect new footnotes inside of block
+                    for j, s in enumerate(l['spans']):
+                        if s['text'].isdigit() and j == 0 and prevSpan is not None:
+                            prevSpan['text'] += '<br>'
+                        prevSpan = s
+                    l['spans'][-1]['text'] += ' '
+                
+            elif (spanRectangle.type == Type.TEXT or spanRectangle.type == Type.INLINE_EQUATION):
                 # Start by adding paragraph tags around blocks
                 # if tabs, only add <br> if there are tab things
                 # if not, add <br> before and after blocks, unless block is both (start or end) and starts with capital or ends with .
@@ -882,29 +972,33 @@ def fourth_pass(blocks, span_collection, statistics, page):
         if b['type'] == 0:
             for j, l in enumerate(b["lines"]):
                 for k, s in enumerate(l['spans']):
+                    if(not s.get('line_space',False)):
+                        s['original_text'] = s['text']
+                        s['text'] =  s['text'].encode('ascii', 'xmlcharrefreplace').decode('utf-8')
+                        # replace accute accent with it's html code (pdf encodes this in a silly way?)
+                        # # TODO test following line as replacement
+                        #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
+                        #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
+                        #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
 
-                    s['original_text'] = s['text']
-                    s['text'] =  s['text'].encode('ascii', 'xmlcharrefreplace').decode('utf-8')
-                    # replace accute accent with it's html code (pdf encodes this in a silly way?)
-                    # may have to do many more
-                    # # TODO test following line as replacement
-                    #  s['text'] = re.sub('´(.)', r'\1&#x301;',s['text'])
-                    #  s['text'] = re.sub('¨(.)', r'\1&#x308;',s['text'])
-                    #  print(s['text'].encode('UTF-8',errors='backslashreplace'), " len:", len(s['original_text']))
 
-                    # The following section fixes lines that 
-                    if(not s.get('line_space',False) and 
-                            (len(s['text']) > 10) and 
-                            (' ' not in s['text'])):
-                        raw = page.getText("rawdict")
-                        characters = raw['blocks'][i]['lines'][j]['spans'][k]['chars']
-                        chars = []
-                        for i in range(len(characters)-1):
-                            if characters[i]['bbox'][0] - characters[i-1]['bbox'][2] > 1e-2:
-                                chars.append(' ')
-                            chars.append(characters[i]['c'])
-                        chars.append(characters[-1]['c'])
-                        s['text'] = ''.join(chars)
+                        # The following section fixes lines that have no spaces
+                        if((len(s['text']) > 12) and (' ' not in s['text'])):
+                            print(s['text'], i, j, k)
+                            raw = page.getText("rawdict")
+
+                            try:
+                                characters = raw['blocks'][i]['lines'][j]['spans'][k]['chars']
+                                chars = []
+                                for i in range(len(characters)-1):
+                                    if characters[i]['bbox'][0] - characters[i-1]['bbox'][2] > 1e-2:
+                                        chars.append(' ')
+                                    chars.append(characters[i]['c'])
+                                chars.append(characters[-1]['c'])
+                                s['text'] = ''.join(chars)
+                            except IndexError:
+                                print("Error: RawDict and doesn't match blocks")
+
     return blocks
 
 
@@ -942,6 +1036,7 @@ def convert_to_span_collection(blocks, rectangle_collection, ungroup=False):
                     for s in l['spans']:
                         r = span_collection.create_rect(s['bbox'])
                         r.type = blockRectangle.type
+                        r.footnote = blockRectangle.footnote
                         r.content = s
                         if blockRectangle.type == Type.DISPLAY_EQUATION:
                             r.group = group
@@ -959,7 +1054,7 @@ def erase_rectangles(selection, rectangles, graph):
     for mode in rectangles:
         rectangles[mode] = list(filter(condition, rectangles[mode]))
 
-def create_epub_file(list_of_html_pages, dict_of_image_files, doc):
+def create_epub_file(list_of_html_pages, dict_of_image_files, list_of_footnotes, doc):
     book = epub.EpubBook()
     # metadata
     book.set_identifier('random_id_'+str(np.random.randint(10e15, 10e16)))
@@ -996,6 +1091,13 @@ def create_epub_file(list_of_html_pages, dict_of_image_files, doc):
         book.add_item(chapter)
         toc_item[3]['epub_html'] = chapter
 
+    footnotes = epub.EpubHtml(title="Footnotes",file_name=f"footnotes.xhtml",lang=LANGUAGE)
+    footnotes.content = '<br>'
+    for footnote in list_of_footnotes:
+        if footnote is not None:
+            footnotes.content += footnote
+    book.add_item(footnotes)
+
 
     def tocTranslator(toc, i=0, level=1):
         ''' recursively translates pdf table of contents to epub table of contents '''
@@ -1012,7 +1114,6 @@ def create_epub_file(list_of_html_pages, dict_of_image_files, doc):
                 break
         return output, i
     toc, _ = tocTranslator(table_of_contents)
-            
     book.toc = toc
     
     # add default NCX and Nav file
@@ -1095,6 +1196,8 @@ blocks = page.getText("dict")["blocks"]
 blocks, rectangle_collection = initial_draw_and_process_page(page, blocks, statistics)
 list_of_html_pages = [None]*doc.pageCount
 dict_of_image_files = dict()
+list_of_footnotes = [None]*doc.pageCount
+
 
 for r in rectangle_collection:
     if r.type == Type.DISPLAY_EQUATION:
@@ -1192,9 +1295,10 @@ while True:
     elif event == "Prev": # Prev button was just pressed
         window["Prev"].Widget.config(cursor='watch') # loading
         # save page
-        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html, images, footnotes = print_page_to_html(page, blocks, rectangle_collection, statistics)
         list_of_html_pages[page.number] = html
         dict_of_image_files.update(images)
+        list_of_footnotes[page.number] = footnotes
 
         current_page -= 1
         current_page = clip(current_page, 0, doc.pageCount-1)
@@ -1218,9 +1322,10 @@ while True:
     elif event == "Next": # Next button was just pressed
         window["Next"].Widget.config(cursor='watch') # loading
         # save page
-        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html, images, footnotes = print_page_to_html(page, blocks, rectangle_collection, statistics)
         list_of_html_pages[page.number] = html
         dict_of_image_files.update(images)
+        list_of_footnotes[page.number] = footnotes
 
         #  for use when pressing button
         current_page += 1
@@ -1246,9 +1351,10 @@ while True:
 
     elif event == "Show html in browser":
         window[ "Show html in browser"].Widget.config(cursor='watch') # loading
-        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html, images, footnotes = print_page_to_html(page, blocks, rectangle_collection, statistics)
         list_of_html_pages[page.number] = html
         dict_of_image_files.update(images)
+        list_of_footnotes[page.number] = footnotes
 
         # join all the pages that have been processed so far
         accumulator = ''
@@ -1256,22 +1362,30 @@ while True:
             if html_page is not None:
                 accumulator += html_page
         joined_pages = accumulator
-    
+        joined_pages = joined_pages.replace("footnotes.xhtml","")
+
+        footnote_accumulator = ''
+        for footnote in list_of_footnotes:
+            if footnote is not None:
+                footnote_accumulator += footnote
+        
+        joined_footnotes = footnote_accumulator.replace("aside", "div")
 
         with open("out.html", "w") as f:
-            f.write(create_css_string() + joined_pages)
+            f.write(create_css_string() + joined_pages + joined_footnotes)
 
         webbrowser.open("out.html")
         window[ "Show html in browser"].Widget.config(cursor='left_ptr') # loading
 
     elif event == "Make ePub":
         window['Make ePub'].Widget.config(cursor='watch') # loading
-        html, images = print_page_to_html(page, blocks, rectangle_collection, statistics, )
+        html, images, footnotes = print_page_to_html(page, blocks, rectangle_collection, statistics)
         list_of_html_pages[page.number] = html
         dict_of_image_files.update(images)
+        list_of_footnotes[page.number] = footnotes
 
         try:
-            create_epub_file(list_of_html_pages, dict_of_image_files, doc)
+            create_epub_file(list_of_html_pages, dict_of_image_files, list_of_footnotes, doc)
         except: # catch ALL exceptions
             traceback.print_exc()
 
@@ -1302,7 +1416,12 @@ while True:
             pass
 
     elif event == "Process page":
+        window['Process page'].Widget.config(cursor='watch') # loading
+        
         # can use bbox x coords to detect spaces
-        raw = page.getText("rawdict")
-        import pprint
-        pprint.pprint(raw)
+        html, images, footnotes = print_page_to_html(page, blocks, rectangle_collection, statistics)
+        list_of_html_pages[page.number] = html
+        dict_of_image_files.update(images)
+        list_of_footnotes[page.number] = footnotes
+
+        window['Process page'].Widget.config(cursor='left_ptr') # loading
