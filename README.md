@@ -2,7 +2,7 @@
 
 A tool to help convert textbooks and papers to reflowable html or epub formats.
 
-**This project is no longer being developed, because I found a better solution to the problem reading pdfs on my ereader. I now use KOReader, which improved the experience enough that I was no longer motivated to finish this project. The project currently almost completely works on very basic documents, and most of it's bugs are related to equations and images. If you want this project finished, please let me know, I have a plan for how I would rewrite most of this project to finish it off and make it useful.**
+**This project is no longer being developed, because I found a better solution to the problem reading pdfs on my ereader. I now use KOReader, which improved the experience enough that I was no longer motivated to finish this project. The project currently almost works on very basic documents, and most of it's bugs are related to equations and images. **
 
 ## Usage
 
